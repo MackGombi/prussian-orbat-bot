@@ -63,6 +63,11 @@ const JAEGER_SPREADSHEET_ID = cleanEnvironmentValue(
 
 const SERVICE_ACCOUNT_FILE = "./service-account.json";
 
+const GOOGLE_SERVICE_ACCOUNT_BASE64 =
+  cleanEnvironmentValue(
+    process.env.GOOGLE_SERVICE_ACCOUNT_BASE64
+  );
+
 const FIRST_MEMBER_ROW = 6;
 const COMMAND_LAST_MEMBER_ROW = 7;
 const STANDARD_LAST_MEMBER_ROW = 20;
@@ -169,9 +174,12 @@ if (!APPS_SCRIPT_URL.endsWith("/exec")) {
   );
 }
 
-if (!fs.existsSync(SERVICE_ACCOUNT_FILE)) {
+if (
+  !GOOGLE_SERVICE_ACCOUNT_BASE64 &&
+  !fs.existsSync(SERVICE_ACCOUNT_FILE)
+) {
   throw new Error(
-    "service-account.json could not be found in the bot folder."
+    "Google credentials are missing. Add service-account.json locally or set GOOGLE_SERVICE_ACCOUNT_BASE64 when hosting."
   );
 }
 
@@ -355,8 +363,34 @@ const client = new Client({
 |--------------------------------------------------------------------------
 */
 
+function loadGoogleCredentials() {
+  if (GOOGLE_SERVICE_ACCOUNT_BASE64) {
+    try {
+      const decodedJson = Buffer
+        .from(
+          GOOGLE_SERVICE_ACCOUNT_BASE64,
+          "base64"
+        )
+        .toString("utf8");
+
+      return JSON.parse(decodedJson);
+    } catch (error) {
+      throw new Error(
+        "GOOGLE_SERVICE_ACCOUNT_BASE64 could not be decoded as valid service-account JSON."
+      );
+    }
+  }
+
+  return JSON.parse(
+    fs.readFileSync(
+      SERVICE_ACCOUNT_FILE,
+      "utf8"
+    )
+  );
+}
+
 const auth = new google.auth.GoogleAuth({
-  keyFile: SERVICE_ACCOUNT_FILE,
+  credentials: loadGoogleCredentials(),
   scopes: [
     "https://www.googleapis.com/auth/spreadsheets"
   ]
