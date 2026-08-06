@@ -44,8 +44,8 @@ if (!GUILD_ID) {
 
 const REGIMENT_CHOICES = [
   {
-    name: "10. Colbergches Infanterie-Regiment",
-    value: "10_colberg"
+    name: "11. Erstes Schlesisches Infanterie-Regiment",
+    value: "11_schlesisches"
   },
   {
     name:
@@ -59,6 +59,7 @@ const REGIMENT_CHOICES = [
 ];
 
 const RANK_CHOICES = [
+  { name: "Rekrut", value: "Rekrut" },
   { name: "Soldat", value: "Soldat" },
   { name: "Obersoldat", value: "Obersoldat" },
   { name: "Gefreiter", value: "Gefreiter" },
