@@ -49,9 +49,9 @@ const ROVER_API_BASE_URL =
     process.env.ROVER_API_BASE_URL
   ) || "https://registry.rover.link/api";
 
-const COLBERG_SPREADSHEET_ID = cleanEnvironmentValue(
-  process.env.COLBERG_SPREADSHEET_ID
-);
+const ERSTESSCHLESISCHES_SPREADSHEET_ID = cleanEnvironmentValue(
+    process.env.ERSTESSCHLESISCHES_SPREADSHEET_ID
+  );
 
 const WESTPREUSSISCHES_SPREADSHEET_ID = cleanEnvironmentValue(
   process.env.WESTPREUSSISCHES_SPREADSHEET_ID
@@ -77,7 +77,7 @@ const GARNISON_SHEET_NAME = "Garnison Kompanie";
 const TWO_ROW_COMMAND_SHEETS = new Set([
   "Ostpreussisches Jäger-Bataillon Command",
   "6. Generalstab",
-  "10. Generalstab"
+  "11. Generalstab"
 ]);
 const ORBAT_LOG_CHANNEL_NAME = "orbat-logs";
 
@@ -93,17 +93,19 @@ const ORBAT_LOG_CHANNEL_NAME = "orbat-logs";
 
 const REGIMENTS = [
   {
-    key: "colberg",
-    displayName: "10. Colbergches Infanterie-Regiment",
-    nicknamePrefix: "10",
-    spreadsheetId: COLBERG_SPREADSHEET_ID,
+    key: "erstes_schlesisches",
+    displayName:
+      "11. Erstes Schlesisches Infanterie-Regiment",
+    nicknamePrefix: "11",
+    spreadsheetId:
+      ERSTESSCHLESISCHES_SPREADSHEET_ID,
     aliases: [
-      "10_colberg",
-      "colberg",
-      "10. colberg",
-      "10. colbergches infanterie-regiment",
-      "10. colbergsches infanterie-regiment",
-      "10th colberg"
+      "11_schlesisches",
+      "erstes_schlesisches",
+      "11. erstes schlesisches infanterie-regiment",
+      "11. schlesisches",
+      "schlesisches",
+      "11th silesian"
     ]
   },
   {
@@ -111,7 +113,8 @@ const REGIMENTS = [
     displayName:
       "6. Erstes Westpreußisches Infanterie-Regiment",
     nicknamePrefix: "6",
-    spreadsheetId: WESTPREUSSISCHES_SPREADSHEET_ID,
+    spreadsheetId:
+      WESTPREUSSISCHES_SPREADSHEET_ID,
     aliases: [
       "6_westpreussisches",
       "westpreussisches",
@@ -154,7 +157,10 @@ const requiredEnvironmentValues = [
   ["APPS_SCRIPT_URL", APPS_SCRIPT_URL],
   ["BOT_WEBHOOK_SECRET", BOT_WEBHOOK_SECRET],
   ["ROVER_API_KEY", ROVER_API_KEY],
-  ["COLBERG_SPREADSHEET_ID", COLBERG_SPREADSHEET_ID],
+  [
+    "ERSTESSCHLESISCHES_SPREADSHEET_ID",
+    ERSTESSCHLESISCHES_SPREADSHEET_ID
+  ],
   [
     "WESTPREUSSISCHES_SPREADSHEET_ID",
     WESTPREUSSISCHES_SPREADSHEET_ID
@@ -2576,7 +2582,7 @@ client.on(
 
       if (error?.message === "UNKNOWN_REGIMENT") {
         errorMessage =
-          "The selected regiment is not configured. Re-register the slash command and make sure its regiment values are colberg, westpreussisches, or jaeger.";
+          "The selected regiment is not configured. Re-register the slash command and make sure its regiment values are 11_schlesisches, 6_westpreussisches, or ostpreussisches_jaeger.";
       } else if (error?.message === "COMPANY_FULL") {
         const selectedCompany =
           interaction.options
