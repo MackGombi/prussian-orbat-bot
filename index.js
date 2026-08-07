@@ -3248,6 +3248,21 @@ client.on(
         return;
       }
 
+      console.log("REKRUT VALIDATION:", {
+        rank,
+        company: matchedCompany,
+        normalizedRank:
+          normalizeText(rank),
+        normalizedCompany:
+          normalizeText(matchedCompany),
+        isRekrut:
+          isRekrutRank(rank),
+        isFirstKrumper:
+          isFirstKrumperCompany(
+            matchedCompany
+          )
+      });
+
       try {
         assertCompanyRankAllowed(
           matchedCompany,
