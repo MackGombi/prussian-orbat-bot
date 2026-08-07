@@ -504,6 +504,18 @@ function isFirstKrumperCompany(sheetName) {
   );
 }
 
+function getCurrentOrbatDate() {
+  return new Intl.DateTimeFormat(
+    "en-US",
+    {
+      timeZone: "America/Los_Angeles",
+      month: "2-digit",
+      day: "2-digit",
+      year: "numeric"
+    }
+  ).format(new Date());
+}
+
 function isSecondKrumperCompany(sheetName) {
   return (
     normalizeText(sheetName) ===
@@ -573,22 +585,22 @@ async function sortCompanyByRank({
     lastMemberRow - FIRST_MEMBER_ROW + 1;
 
   /*
-   * C:G are kept together so the hidden timezone storage in G stays
-   * attached to the correct member while rows are reordered.
+   * C:H are kept together so the hidden timezone storage in G and the
+   * Krümper entry date in H stay attached to the correct member while rows are reordered.
    */
   const response =
     await sheets.spreadsheets.values.get({
       spreadsheetId,
       range:
         `${safeSheetName}!C${FIRST_MEMBER_ROW}:` +
-        `G${lastMemberRow}`,
+        `H${lastMemberRow}`,
       majorDimension: "ROWS"
     });
 
   const members = (response.data.values || [])
     .map(row => {
       const padded = Array.from(
-        { length: 5 },
+        { length: 6 },
         (_, index) => row[index] ?? ""
       );
 
@@ -625,14 +637,14 @@ async function sortCompanyByRank({
     Array.from(
       { length: slotCount },
       (_, index) =>
-        members[index] || ["", "", "", "", ""]
+        members[index] || ["", "", "", "", "", ""]
     );
 
   await sheets.spreadsheets.values.update({
     spreadsheetId,
     range:
       `${safeSheetName}!C${FIRST_MEMBER_ROW}:` +
-      `G${lastMemberRow}`,
+      `H${lastMemberRow}`,
     valueInputOption: "USER_ENTERED",
     requestBody: {
       values: rewrittenRows
@@ -1010,7 +1022,8 @@ async function removeMemberFromSheet({
         `${safeSheetName}!C${row}`,
         `${safeSheetName}!D${row}`,
         `${safeSheetName}!E${row}`,
-        `${safeSheetName}!F${row}`
+        `${safeSheetName}!F${row}`,
+        `${safeSheetName}!H${row}`
       ]
     }
   });
@@ -1059,28 +1072,37 @@ async function addMemberToSheet({
 
   const safeSheetName = escapeSheetName(sheetName);
 
+  const writeData = [
+    {
+      range: `${safeSheetName}!C${row}`,
+      values: [[robloxUsername]]
+    },
+    {
+      range: `${safeSheetName}!D${row}`,
+      values: [[discordId]]
+    },
+    {
+      range: `${safeSheetName}!E${row}`,
+      values: [[rank]]
+    },
+    {
+      range: `${safeSheetName}!F${row}`,
+      values: [[timezone]]
+    }
+  ];
+
+  if (isFirstKrumperCompany(sheetName)) {
+    writeData.push({
+      range: `${safeSheetName}!H${row}`,
+      values: [[getCurrentOrbatDate()]]
+    });
+  }
+
   await sheets.spreadsheets.values.batchUpdate({
     spreadsheetId,
     requestBody: {
       valueInputOption: "USER_ENTERED",
-      data: [
-        {
-          range: `${safeSheetName}!C${row}`,
-          values: [[robloxUsername]]
-        },
-        {
-          range: `${safeSheetName}!D${row}`,
-          values: [[discordId]]
-        },
-        {
-          range: `${safeSheetName}!E${row}`,
-          values: [[rank]]
-        },
-        {
-          range: `${safeSheetName}!F${row}`,
-          values: [[timezone]]
-        }
-      ]
+      data: writeData
     }
   });
 
