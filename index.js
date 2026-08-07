@@ -464,6 +464,209 @@ function getLastMemberRow(sheetName) {
   return STANDARD_LAST_MEMBER_ROW;
 }
 
+/*
+|--------------------------------------------------------------------------
+| ORBAT rank ordering and Krümper rules
+|--------------------------------------------------------------------------
+|
+| Lower priority number = higher position on the sheet.
+|--------------------------------------------------------------------------
+*/
+
+const RANK_SORT_PRIORITY = new Map([
+  ["oberst", 1],
+  ["oberst lieutenant", 2],
+  ["major", 3],
+  ["stabs kapitan", 4],
+  ["kapitan", 5],
+  ["premier lieutenant", 6],
+  ["sekonde lieutenant", 7],
+  ["fahnrich", 8],
+  ["feldwebel", 9],
+  ["sergeant", 10],
+  ["korporal", 11],
+  ["vizekorporal", 12],
+  ["obergefreiter", 13],
+  ["gefreiter", 14],
+  ["obersoldat", 15],
+  ["soldat", 16],
+  ["rekrut", 17]
+]);
+
+function isRekrutRank(rank) {
+  return normalizeText(rank) === "rekrut";
+}
+
+function isFirstKrumperCompany(sheetName) {
+  const normalized = normalizeText(sheetName);
+
+  return (
+    normalized === "1 krumper kompanie" ||
+    normalized === "1 krumperkompanie" ||
+    normalized.startsWith("1 krumper kompanie ")
+  );
+}
+
+function isMusketierCompany(sheetName) {
+  return normalizeText(sheetName).includes("musketier");
+}
+
+function assertCompanyRankAllowed(sheetName, rank) {
+  if (
+    isFirstKrumperCompany(sheetName) &&
+    !isRekrutRank(rank)
+  ) {
+    throw new Error("FIRST_KRUMPER_REKRUT_ONLY");
+  }
+}
+
+async function findMemberRowInCompanyByDiscordId({
+  spreadsheetId,
+  sheetName,
+  discordId
+}) {
+  const safeSheetName = escapeSheetName(sheetName);
+  const lastMemberRow = getLastMemberRow(sheetName);
+
+  const response =
+    await sheets.spreadsheets.values.get({
+      spreadsheetId,
+      range:
+        `${safeSheetName}!D${FIRST_MEMBER_ROW}:` +
+        `D${lastMemberRow}`
+    });
+
+  const values = response.data.values || [];
+  const targetId = String(discordId || "").trim();
+
+  for (let i = 0; i < values.length; i += 1) {
+    if (String(values[i]?.[0] || "").trim() === targetId) {
+      return FIRST_MEMBER_ROW + i;
+    }
+  }
+
+  return null;
+}
+
+async function sortCompanyByRank({
+  spreadsheetId,
+  sheetName
+}) {
+  const safeSheetName = escapeSheetName(sheetName);
+  const lastMemberRow = getLastMemberRow(sheetName);
+  const slotCount =
+    lastMemberRow - FIRST_MEMBER_ROW + 1;
+
+  /*
+   * C:G are kept together so the hidden timezone storage in G stays
+   * attached to the correct member while rows are reordered.
+   */
+  const response =
+    await sheets.spreadsheets.values.get({
+      spreadsheetId,
+      range:
+        `${safeSheetName}!C${FIRST_MEMBER_ROW}:` +
+        `G${lastMemberRow}`,
+      majorDimension: "ROWS"
+    });
+
+  const members = (response.data.values || [])
+    .map(row => {
+      const padded = Array.from(
+        { length: 5 },
+        (_, index) => row[index] ?? ""
+      );
+
+      return padded;
+    })
+    .filter(row =>
+      String(row[0] || "").trim() ||
+      String(row[1] || "").trim()
+    );
+
+  members.sort((a, b) => {
+    const rankA =
+      RANK_SORT_PRIORITY.get(
+        normalizeText(a[2])
+      ) ?? 999;
+
+    const rankB =
+      RANK_SORT_PRIORITY.get(
+        normalizeText(b[2])
+      ) ?? 999;
+
+    if (rankA !== rankB) {
+      return rankA - rankB;
+    }
+
+    return String(a[0] || "").localeCompare(
+      String(b[0] || ""),
+      undefined,
+      { sensitivity: "base" }
+    );
+  });
+
+  const rewrittenRows =
+    Array.from(
+      { length: slotCount },
+      (_, index) =>
+        members[index] || ["", "", "", "", ""]
+    );
+
+  await sheets.spreadsheets.values.update({
+    spreadsheetId,
+    range:
+      `${safeSheetName}!C${FIRST_MEMBER_ROW}:` +
+      `G${lastMemberRow}`,
+    valueInputOption: "USER_ENTERED",
+    requestBody: {
+      values: rewrittenRows
+    }
+  });
+
+  return members.length;
+}
+
+async function findAvailableMusketierCompany(regiment) {
+  const companies =
+    await getCompanySheetNames(regiment);
+
+  const musketierCompanies =
+    companies
+      .filter(isMusketierCompany)
+      .sort((a, b) =>
+        a.localeCompare(
+          b,
+          undefined,
+          {
+            numeric: true,
+            sensitivity: "base"
+          }
+        )
+      );
+
+  if (musketierCompanies.length === 0) {
+    throw new Error("NO_MUSKETIER_COMPANY");
+  }
+
+  for (const companyName of musketierCompanies) {
+    try {
+      await findFirstEmptyRow({
+        spreadsheetId: regiment.spreadsheetId,
+        sheetName: companyName
+      });
+
+      return companyName;
+    } catch (error) {
+      if (error?.message !== "COMPANY_FULL") {
+        throw error;
+      }
+    }
+  }
+
+  throw new Error("MUSKETIER_COMPANIES_FULL");
+}
+
 
 /*
 |--------------------------------------------------------------------------
@@ -1479,6 +1682,23 @@ client.on(
         const finalRank =
           requestedNewRank || previousRank;
 
+        if (
+          isFirstKrumperCompany(matchedCompany) &&
+          !isRekrutRank(finalRank)
+        ) {
+          await interaction.editReply(
+            [
+              "1. Krümper Kompanie is recruit-only.",
+              "",
+              `**Destination Company:** ${matchedCompany}`,
+              `**Requested Rank:** ${finalRank || "Not set"}`,
+              "",
+              "Only members with the rank Rekrut can be placed in 1. Krümper Kompanie."
+            ].join("\n")
+          );
+          return;
+        }
+
         const rankChanged =
           Boolean(requestedNewRank) &&
           normalizeText(requestedNewRank) !==
@@ -1517,6 +1737,23 @@ client.on(
             rank:
               finalRank
           });
+
+          await sortCompanyByRank({
+            spreadsheetId:
+              existingMember.regiment.spreadsheetId,
+            sheetName:
+              existingMember.companyName
+          });
+
+          existingMember.row =
+            await findMemberRowInCompanyByDiscordId({
+              spreadsheetId:
+                existingMember.regiment.spreadsheetId,
+              sheetName:
+                existingMember.companyName,
+              discordId:
+                discordMember.id
+            }) || existingMember.row;
 
           let updatedNickname = null;
           let nicknameWarning = null;
@@ -1612,7 +1849,7 @@ client.on(
           return;
         }
 
-        const destinationRow =
+        let destinationRow =
           await addMemberToSheet({
             spreadsheetId:
               newRegiment.spreadsheetId,
@@ -1682,6 +1919,30 @@ client.on(
               "The Apps Script webhook failed.";
           }
         }
+
+        await sortCompanyByRank({
+          spreadsheetId:
+            existingMember.regiment.spreadsheetId,
+          sheetName:
+            existingMember.companyName
+        });
+
+        await sortCompanyByRank({
+          spreadsheetId:
+            newRegiment.spreadsheetId,
+          sheetName:
+            matchedCompany
+        });
+
+        destinationRow =
+          await findMemberRowInCompanyByDiscordId({
+            spreadsheetId:
+              newRegiment.spreadsheetId,
+            sheetName:
+              matchedCompany,
+            discordId:
+              discordMember.id
+          }) || destinationRow;
 
         let updatedNickname = null;
         let nicknameWarning = null;
@@ -1823,6 +2084,11 @@ client.on(
         ) {
           errorMessage =
             "The destination regiment could not be recognized.";
+        } else if (
+          errorMessage === "FIRST_KRUMPER_REKRUT_ONLY"
+        ) {
+          errorMessage =
+            "1. Krümper Kompanie is recruit-only. Only Rekrut may be assigned there.";
         }
 
         try {
@@ -1888,25 +2154,23 @@ client.on(
           return;
         }
 
-        const safeSheetName =
-          escapeSheetName(
-            existingMember.companyName
-          );
-
-        const currentRankResponse =
-          await sheets.spreadsheets.values.get({
+        const memberRecord =
+          await getMemberRecord({
             spreadsheetId:
               existingMember.regiment.spreadsheetId,
-            range:
-              `${safeSheetName}!E${existingMember.row}`
+            sheetName:
+              existingMember.companyName,
+            row:
+              existingMember.row
           });
 
-        const previousRank = String(
-          currentRankResponse.data.values?.[0]?.[0] ||
-          "Not set"
-        ).trim();
+        const previousRank =
+          String(memberRecord.rank || "").trim();
 
-        if (previousRank === newRank) {
+        if (
+          normalizeText(previousRank) ===
+          normalizeText(newRank)
+        ) {
           await interaction.editReply(
             [
               "That member already has the selected rank.",
@@ -1922,6 +2186,247 @@ client.on(
           return;
         }
 
+        /*
+         * Special recruit promotion:
+         * /rank is the ONLY command that automatically moves a Rekrut out
+         * of 1. Krümper Kompanie. The bot finds the first Musketier company
+         * in the same regiment with a free slot.
+         */
+        const mustLeaveRecruitCompany =
+          isFirstKrumperCompany(
+            existingMember.companyName
+          ) &&
+          isRekrutRank(previousRank) &&
+          !isRekrutRank(newRank);
+
+        if (mustLeaveRecruitCompany) {
+          const destinationCompany =
+            await findAvailableMusketierCompany(
+              existingMember.regiment
+            );
+
+          let destinationRow =
+            await addMemberToSheet({
+              spreadsheetId:
+                existingMember.regiment.spreadsheetId,
+              sheetName:
+                destinationCompany,
+              robloxUsername:
+                memberRecord.robloxUsername,
+              discordId:
+                memberRecord.discordId ||
+                discordMember.id,
+              rank:
+                newRank,
+              timezone:
+                memberRecord.timezone
+            });
+
+          let timezoneWarning = null;
+
+          if (memberRecord.timezone) {
+            try {
+              await processTimezoneWithAppsScript({
+                spreadsheetId:
+                  existingMember.regiment.spreadsheetId,
+                sheetName:
+                  destinationCompany,
+                row:
+                  destinationRow,
+                timezone:
+                  memberRecord.timezone
+              });
+            } catch (webhookError) {
+              console.error(
+                "Recruit promotion transfer succeeded, but timezone processing failed:"
+              );
+              console.error(webhookError);
+
+              timezoneWarning =
+                webhookError?.message ||
+                "The Apps Script webhook failed.";
+            }
+          }
+
+          try {
+            await removeMemberFromSheet({
+              spreadsheetId:
+                existingMember.regiment.spreadsheetId,
+              sheetName:
+                existingMember.companyName,
+              row:
+                existingMember.row
+            });
+          } catch (sourceClearError) {
+            try {
+              await removeMemberFromSheet({
+                spreadsheetId:
+                  existingMember.regiment.spreadsheetId,
+                sheetName:
+                  destinationCompany,
+                row:
+                  destinationRow
+              });
+            } catch (rollbackError) {
+              console.error(
+                "Recruit promotion rollback failed:"
+              );
+              console.error(rollbackError);
+            }
+
+            throw sourceClearError;
+          }
+
+          await sortCompanyByRank({
+            spreadsheetId:
+              existingMember.regiment.spreadsheetId,
+            sheetName:
+              existingMember.companyName
+          });
+
+          await sortCompanyByRank({
+            spreadsheetId:
+              existingMember.regiment.spreadsheetId,
+            sheetName:
+              destinationCompany
+          });
+
+          destinationRow =
+            await findMemberRowInCompanyByDiscordId({
+              spreadsheetId:
+                existingMember.regiment.spreadsheetId,
+              sheetName:
+                destinationCompany,
+              discordId:
+                discordMember.id
+            }) || destinationRow;
+
+          let updatedNickname = null;
+          let nicknameWarning = null;
+
+          try {
+            updatedNickname =
+              await updateDiscordNickname({
+                interaction,
+                discordUserId:
+                  discordMember.id,
+                regiment:
+                  existingMember.regiment,
+                rank:
+                  newRank,
+                robloxUsername:
+                  memberRecord.robloxUsername
+              });
+          } catch (nicknameError) {
+            console.error(
+              "Recruit promotion succeeded, but nickname updating failed:"
+            );
+            console.error(nicknameError);
+
+            nicknameWarning =
+              nicknameError?.message ||
+              "The Discord nickname could not be updated.";
+          }
+
+          await sendOrbatLog({
+            interaction,
+            category: "Rank Management",
+            action:
+              "Rekrut Promoted and Automatically Transferred",
+            affectedMember: discordMember,
+            robloxUsername:
+              memberRecord.robloxUsername,
+            changes: [
+              {
+                label: "Regiment",
+                after:
+                  existingMember.regiment.displayName
+              },
+              {
+                label: "Company",
+                before:
+                  existingMember.companyName,
+                after:
+                  destinationCompany
+              },
+              {
+                label: "Rank",
+                before:
+                  previousRank,
+                after:
+                  newRank
+              },
+              {
+                label: "Spreadsheet Row",
+                before:
+                  existingMember.row,
+                after:
+                  destinationRow
+              }
+            ],
+            notes: [
+              "Automatic Musketier transfer triggered by /rank.",
+              nicknameWarning
+                ? "Discord nickname update failed."
+                : null,
+              timezoneWarning
+                ? "Timezone processing returned a warning."
+                : null
+            ].filter(Boolean).join(" ")
+          });
+
+          const replyLines = [
+            "Member promoted successfully.",
+            "",
+            "Because the member was a Rekrut in 1. Krümper Kompanie, they were automatically transferred to an available Musketier company.",
+            "",
+            `**Discord Member:** ${discordMember}`,
+            `**Roblox Username:** ${memberRecord.robloxUsername || "Not set"}`,
+            `**Regiment:** ${existingMember.regiment.displayName}`,
+            `**Previous Company:** ${existingMember.companyName}`,
+            `**New Company:** ${destinationCompany}`,
+            `**Previous Rank:** ${previousRank}`,
+            `**New Rank:** ${newRank}`,
+            `**New Spreadsheet Row:** ${destinationRow}`
+          ];
+
+          if (updatedNickname) {
+            replyLines.push(
+              `**Discord Nickname:** ${updatedNickname}`
+            );
+          }
+
+          if (nicknameWarning) {
+            replyLines.push(
+              "",
+              "⚠️ The promotion succeeded, but the Discord nickname could not be updated.",
+              `**Nickname Error:** ${nicknameWarning}`
+            );
+          }
+
+          if (timezoneWarning) {
+            replyLines.push(
+              "",
+              "⚠️ The promotion succeeded, but timezone processing returned a warning:",
+              timezoneWarning
+            );
+          }
+
+          await interaction.editReply(
+            replyLines.join("\n")
+          );
+
+          return;
+        }
+
+        /*
+         * Normal rank change.
+         */
+        assertCompanyRankAllowed(
+          existingMember.companyName,
+          newRank
+        );
+
         await updateMemberRank({
           spreadsheetId:
             existingMember.regiment.spreadsheetId,
@@ -1933,15 +2438,22 @@ client.on(
             newRank
         });
 
-        const memberRecord =
-          await getMemberRecord({
+        await sortCompanyByRank({
+          spreadsheetId:
+            existingMember.regiment.spreadsheetId,
+          sheetName:
+            existingMember.companyName
+        });
+
+        const sortedRow =
+          await findMemberRowInCompanyByDiscordId({
             spreadsheetId:
               existingMember.regiment.spreadsheetId,
             sheetName:
               existingMember.companyName,
-            row:
-              existingMember.row
-          });
+            discordId:
+              discordMember.id
+          }) || existingMember.row;
 
         let updatedNickname = null;
         let nicknameWarning = null;
@@ -1971,18 +2483,16 @@ client.on(
         }
 
         const rankReplyLines = [
-            "Member rank updated successfully.",
-            "",
-            `**Discord Member:** ${discordMember}`,
-            `**Discord ID:** ${discordMember.id}`,
-            `**Regiment:** ${existingMember.regiment.displayName}`,
-            `**Company:** ${existingMember.companyName}`,
-            `**Spreadsheet Row:** ${existingMember.row}`,
-            `**Previous Rank:** ${previousRank}`,
-            `**New Rank:** ${newRank}`,
-            "",
-            `Updated E${existingMember.row}.`
-          ];
+          "Member rank updated successfully.",
+          "",
+          `**Discord Member:** ${discordMember}`,
+          `**Discord ID:** ${discordMember.id}`,
+          `**Regiment:** ${existingMember.regiment.displayName}`,
+          `**Company:** ${existingMember.companyName}`,
+          `**Previous Rank:** ${previousRank}`,
+          `**New Rank:** ${newRank}`,
+          `**Spreadsheet Row After Sorting:** ${sortedRow}`
+        ];
 
         if (updatedNickname) {
           rankReplyLines.push(
@@ -2019,17 +2529,22 @@ client.on(
             },
             {
               label: "Rank",
-              before: previousRank,
-              after: newRank
+              before:
+                previousRank,
+              after:
+                newRank
             },
             {
               label: "Spreadsheet Row",
-              after: existingMember.row
+              before:
+                existingMember.row,
+              after:
+                sortedRow
             }
           ],
           notes: nicknameWarning
             ? "Rank updated, but the Discord nickname could not be updated."
-            : null
+            : "Company automatically re-sorted by rank."
         });
 
         await interaction.editReply(
@@ -2037,12 +2552,34 @@ client.on(
         );
 
       } catch (error) {
-        console.error("Failed to change member rank:");
+        console.error(
+          "Failed to change member rank:"
+        );
         console.error(error);
 
-        const errorMessage =
+        let errorMessage =
           error?.message ||
           "An unknown error occurred.";
+
+        if (
+          errorMessage ===
+          "FIRST_KRUMPER_REKRUT_ONLY"
+        ) {
+          errorMessage =
+            "1. Krümper Kompanie is recruit-only. Members in that company must have the rank Rekrut.";
+        } else if (
+          errorMessage ===
+          "NO_MUSKETIER_COMPANY"
+        ) {
+          errorMessage =
+            "The regiment does not have a Musketier company available for the automatic recruit transfer.";
+        } else if (
+          errorMessage ===
+          "MUSKETIER_COMPANIES_FULL"
+        ) {
+          errorMessage =
+            "The member was not promoted because every Musketier company in the regiment is full.";
+        }
 
         try {
           if (
@@ -2124,6 +2661,13 @@ client.on(
             existingMember.companyName,
           row:
             existingMember.row
+        });
+
+        await sortCompanyByRank({
+          spreadsheetId:
+            existingMember.regiment.spreadsheetId,
+          sheetName:
+            existingMember.companyName
         });
 
         let nicknameResult;
@@ -2386,6 +2930,23 @@ client.on(
         return;
       }
 
+      if (
+        isFirstKrumperCompany(matchedCompany) &&
+        !isRekrutRank(rank)
+      ) {
+        await interaction.editReply(
+          [
+            "1. Krümper Kompanie is recruit-only.",
+            "",
+            `**Company:** ${matchedCompany}`,
+            `**Selected Rank:** ${rank}`,
+            "",
+            "Choose Rekrut for this company, or select a different company."
+          ].join("\n")
+        );
+        return;
+      }
+
       const existingMember =
         await findMemberByDiscordId(
           discordMember.id
@@ -2408,7 +2969,7 @@ client.on(
         return;
       }
 
-      const row = await addMemberToSheet({
+      let row = await addMemberToSheet({
         spreadsheetId: regiment.spreadsheetId,
         sheetName: matchedCompany,
         robloxUsername,
@@ -2438,6 +2999,23 @@ client.on(
           webhookError?.message ||
           "The Apps Script webhook failed.";
       }
+
+      await sortCompanyByRank({
+        spreadsheetId:
+          regiment.spreadsheetId,
+        sheetName:
+          matchedCompany
+      });
+
+      row =
+        await findMemberRowInCompanyByDiscordId({
+          spreadsheetId:
+            regiment.spreadsheetId,
+          sheetName:
+            matchedCompany,
+          discordId:
+            discordMember.id
+        }) || row;
 
       let nicknameResult = null;
       let nicknameWarning = null;
