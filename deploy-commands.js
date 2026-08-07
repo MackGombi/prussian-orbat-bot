@@ -325,4 +325,4 @@ async function deployCommands() {
   }
 }
 
-deployCommands();
+deployCommands();// attendance choices redeploy
