@@ -1042,6 +1042,16 @@ async function addMemberToSheet({
   rank,
   timezone
 }) {
+  /*
+   * Final hard-lock validation.
+   * A Rekrut may only be written to 1. Krümper-Kompanie, and
+   * 1. Krümper-Kompanie may only contain Rekruten.
+   */
+  assertCompanyRankAllowed(
+    sheetName,
+    rank
+  );
+
   const row = await findFirstEmptyRow({
     spreadsheetId,
     sheetName
