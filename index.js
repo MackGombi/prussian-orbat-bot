@@ -531,24 +531,102 @@ async function writeKrumperEntryDate({
   const dateValue =
     getCurrentOrbatDate();
 
+  const range =
+    `${safeSheetName}!H${row}`;
+
   await sheets.spreadsheets.values.update({
     spreadsheetId,
-    range:
-      `${safeSheetName}!H${row}`,
-    valueInputOption: "RAW",
+    range,
+    valueInputOption: "USER_ENTERED",
     requestBody: {
       values: [[dateValue]]
     }
   });
 
+  let verifyResponse =
+    await sheets.spreadsheets.values.get({
+      spreadsheetId,
+      range
+    });
+
+  let storedDate = String(
+    verifyResponse.data.values?.[0]?.[0] || ""
+  ).trim();
+
+  if (!storedDate) {
+    console.warn(
+      "KRUMPER ENTRY DATE WAS BLANK AFTER FIRST WRITE. RETRYING:",
+      {
+        sheetName,
+        row,
+        date: dateValue
+      }
+    );
+
+    await sheets.spreadsheets.values.update({
+      spreadsheetId,
+      range,
+      valueInputOption: "RAW",
+      requestBody: {
+        values: [[dateValue]]
+      }
+    });
+
+    verifyResponse =
+      await sheets.spreadsheets.values.get({
+        spreadsheetId,
+        range
+      });
+
+    storedDate = String(
+      verifyResponse.data.values?.[0]?.[0] || ""
+    ).trim();
+  }
+
+  if (!storedDate) {
+    throw new Error(
+      `KRUMPER_DATE_WRITE_FAILED: Google Sheets returned a blank value for ${sheetName}!H${row}.`
+    );
+  }
+
   console.log(
-    "KRUMPER ENTRY DATE WRITTEN:",
+    "KRUMPER ENTRY DATE VERIFIED:",
     {
       sheetName,
       row,
-      date: dateValue
+      requestedDate: dateValue,
+      storedDate
     }
   );
+}
+
+async function verifyKrumperDateCleared({
+  spreadsheetId,
+  sheetName,
+  row
+}) {
+  const safeSheetName =
+    escapeSheetName(sheetName);
+
+  const range =
+    `${safeSheetName}!H${row}`;
+
+  const response =
+    await sheets.spreadsheets.values.get({
+      spreadsheetId,
+      range
+    });
+
+  const value = String(
+    response.data.values?.[0]?.[0] || ""
+  ).trim();
+
+  if (value) {
+    await sheets.spreadsheets.values.clear({
+      spreadsheetId,
+      range
+    });
+  }
 }
 
 function isSecondKrumperCompany(sheetName) {
@@ -1072,6 +1150,12 @@ async function removeMemberFromSheet({
         `${safeSheetName}!H${row}`
       ]
     }
+  });
+
+  await verifyKrumperDateCleared({
+    spreadsheetId,
+    sheetName,
+    row
   });
 
   console.log(
