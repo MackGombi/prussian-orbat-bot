@@ -3256,20 +3256,37 @@ client.on(
       } catch (companyRankError) {
         if (
           companyRankError?.message ===
-          "FIRST_KRUMPER_REKRUT_ONLY"
+          "REKRUT_FIRST_KRUMPER_ONLY"
         ) {
           await interaction.editReply(
-            "1. Krümper-Kompanie is recruit-only. Only members with the rank Rekrut may be assigned there."
+            [
+              "The member was not added.",
+              "",
+              `**Selected Rank:** ${rank}`,
+              `**Selected Company:** ${matchedCompany}`,
+              "",
+              "That company is not **1. Krümper-Kompanie**.",
+              "Members with the rank **Rekrut** can only be added to **1. Krümper-Kompanie**.",
+              "",
+              "Select **1. Krümper-Kompanie** and try again."
+            ].join("\n")
           );
           return;
         }
 
         if (
           companyRankError?.message ===
-          "REKRUT_FIRST_KRUMPER_ONLY"
+          "FIRST_KRUMPER_REKRUT_ONLY"
         ) {
           await interaction.editReply(
-            "Members with the rank Rekrut can only be assigned to 1. Krümper-Kompanie."
+            [
+              "The member was not added.",
+              "",
+              `**Selected Rank:** ${rank}`,
+              `**Selected Company:** ${matchedCompany}`,
+              "",
+              "**1. Krümper-Kompanie** can only contain members with the rank **Rekrut**."
+            ].join("\n")
           );
           return;
         }
