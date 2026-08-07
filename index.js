@@ -516,6 +516,41 @@ function getCurrentOrbatDate() {
   ).format(new Date());
 }
 
+async function writeKrumperEntryDate({
+  spreadsheetId,
+  sheetName,
+  row
+}) {
+  if (!isFirstKrumperCompany(sheetName)) {
+    return;
+  }
+
+  const safeSheetName =
+    escapeSheetName(sheetName);
+
+  const dateValue =
+    getCurrentOrbatDate();
+
+  await sheets.spreadsheets.values.update({
+    spreadsheetId,
+    range:
+      `${safeSheetName}!H${row}`,
+    valueInputOption: "RAW",
+    requestBody: {
+      values: [[dateValue]]
+    }
+  });
+
+  console.log(
+    "KRUMPER ENTRY DATE WRITTEN:",
+    {
+      sheetName,
+      row,
+      date: dateValue
+    }
+  );
+}
+
 function isSecondKrumperCompany(sheetName) {
   return (
     normalizeText(sheetName) ===
@@ -1090,13 +1125,6 @@ async function addMemberToSheet({
       values: [[timezone]]
     }
   ];
-
-  if (isFirstKrumperCompany(sheetName)) {
-    writeData.push({
-      range: `${safeSheetName}!H${row}`,
-      values: [[getCurrentOrbatDate()]]
-    });
-  }
 
   await sheets.spreadsheets.values.batchUpdate({
     spreadsheetId,
@@ -2402,6 +2430,15 @@ client.on(
                 discordMember.id
             }) || destinationRow;
 
+          await writeKrumperEntryDate({
+            spreadsheetId:
+              existingMember.regiment.spreadsheetId,
+            sheetName:
+              destinationCompany,
+            row:
+              destinationRow
+          });
+
           let updatedNickname = null;
           let nicknameWarning = null;
 
@@ -3400,6 +3437,14 @@ client.on(
           discordId:
             discordMember.id
         }) || row;
+
+      await writeKrumperEntryDate({
+        spreadsheetId:
+          regiment.spreadsheetId,
+        sheetName:
+          matchedCompany,
+        row
+      });
 
       let nicknameResult = null;
       let nicknameWarning = null;
