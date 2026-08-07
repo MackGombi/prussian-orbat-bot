@@ -770,61 +770,149 @@ async function findMemberRowInCompanyByDiscordId({
   return null;
 }
 
+function getSortLastColumn(sheetName) {
+  /*
+   * Move the full member-owned row data when rank sorting occurs.
+   *
+   * Normal attendance companies:
+   *   C:N = identity, rank/timezone data, Monday-Sunday attendance.
+   *
+   * 2. Krümper-Kompanie:
+   *   C:I = identity/rank data plus Saturday H and Sunday I.
+   *
+   * 1. Krümper-Kompanie:
+   *   C:H = identity/rank data plus entry date H.
+   *
+   * Generalstab/command/Garnison:
+   *   C:G = normal member data only.
+   */
+  if (isFirstKrumperCompany(sheetName)) {
+    return "H";
+  }
+
+  if (isSecondKrumperCompany(sheetName)) {
+    return "I";
+  }
+
+  if (isAttendanceExcludedCompany(sheetName)) {
+    return "G";
+  }
+
+  return "N";
+}
+
+function columnLetterToNumber(column) {
+  let result = 0;
+
+  for (
+    const character of
+    String(column || "").toUpperCase()
+  ) {
+    result =
+      result * 26 +
+      (character.charCodeAt(0) - 64);
+  }
+
+  return result;
+}
+
 async function sortCompanyByRank({
   spreadsheetId,
   sheetName
 }) {
-  const safeSheetName = escapeSheetName(sheetName);
-  const lastMemberRow = getLastMemberRow(sheetName);
+  const safeSheetName =
+    escapeSheetName(sheetName);
+
+  const lastMemberRow =
+    getLastMemberRow(sheetName);
+
   const slotCount =
-    lastMemberRow - FIRST_MEMBER_ROW + 1;
+    lastMemberRow -
+    FIRST_MEMBER_ROW +
+    1;
+
+  const lastColumn =
+    getSortLastColumn(sheetName);
+
+  const columnCount =
+    columnLetterToNumber(lastColumn) -
+    columnLetterToNumber("C") +
+    1;
 
   /*
-   * C:H are kept together so the hidden timezone storage in G and the
-   * Krümper entry date in H stay attached to the correct member while rows are reordered.
+   * Read every cell belonging to the member before sorting. This keeps
+   * attendance attached to the correct person if a promotion changes
+   * their row position.
    */
   const response =
     await sheets.spreadsheets.values.get({
       spreadsheetId,
       range:
         `${safeSheetName}!C${FIRST_MEMBER_ROW}:` +
-        `H${lastMemberRow}`,
+        `${lastColumn}${lastMemberRow}`,
       majorDimension: "ROWS"
     });
 
-  const members = (response.data.values || [])
-    .map(row => {
-      const padded = Array.from(
-        { length: 6 },
-        (_, index) => row[index] ?? ""
-      );
+  const sourceRows =
+    response.data.values || [];
 
-      return padded;
-    })
-    .filter(row =>
-      String(row[0] || "").trim() ||
-      String(row[1] || "").trim()
-    );
+  const members =
+    sourceRows
+      .map((row, originalIndex) => {
+        const padded =
+          Array.from(
+            { length: columnCount },
+            (_, index) =>
+              row[index] ?? ""
+          );
+
+        return {
+          rowData: padded,
+          originalIndex
+        };
+      })
+      .filter(member =>
+        String(
+          member.rowData[0] || ""
+        ).trim() ||
+        String(
+          member.rowData[1] || ""
+        ).trim()
+      );
 
   members.sort((a, b) => {
     const rankA =
       RANK_SORT_PRIORITY.get(
-        normalizeText(a[2])
+        normalizeText(
+          a.rowData[2]
+        )
       ) ?? 999;
 
     const rankB =
       RANK_SORT_PRIORITY.get(
-        normalizeText(b[2])
+        normalizeText(
+          b.rowData[2]
+        )
       ) ?? 999;
 
     if (rankA !== rankB) {
       return rankA - rankB;
     }
 
-    return String(a[0] || "").localeCompare(
-      String(b[0] || ""),
+    /*
+     * Keep the previous alphabetical behavior for members of the
+     * same rank. Their full attendance record moves with them.
+     */
+    return String(
+      a.rowData[0] || ""
+    ).localeCompare(
+      String(
+        b.rowData[0] || ""
+      ),
       undefined,
-      { sensitivity: "base" }
+      {
+        sensitivity: "base"
+      }
     );
   });
 
@@ -832,25 +920,17 @@ async function sortCompanyByRank({
     Array.from(
       { length: slotCount },
       (_, index) =>
-        members[index] || ["", "", "", "", "", ""]
+        members[index]?.rowData ||
+        Array(
+          columnCount
+        ).fill("")
     );
-
-  /*
-   * Column H belongs exclusively to 1. Krümper-Kompanie.
-   * If this is any other company, strip H from every roster row while
-   * preserving C:G. This also cleans up stale dates left by older builds.
-   */
-  if (!isFirstKrumperCompany(sheetName)) {
-    for (const row of rewrittenRows) {
-      row[5] = "";
-    }
-  }
 
   await sheets.spreadsheets.values.update({
     spreadsheetId,
     range:
       `${safeSheetName}!C${FIRST_MEMBER_ROW}:` +
-      `H${lastMemberRow}`,
+      `${lastColumn}${lastMemberRow}`,
     valueInputOption: "USER_ENTERED",
     requestBody: {
       values: rewrittenRows
