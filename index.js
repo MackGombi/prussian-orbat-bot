@@ -498,12 +498,16 @@ function isRekrutRank(rank) {
 }
 
 function isFirstKrumperCompany(sheetName) {
-  const normalized = normalizeText(sheetName);
-
   return (
-    normalized === "1 krumper kompanie" ||
-    normalized === "1 krumperkompanie" ||
-    normalized.startsWith("1 krumper kompanie ")
+    normalizeText(sheetName) ===
+    normalizeText("1. Krümper-Kompanie")
+  );
+}
+
+function isSecondKrumperCompany(sheetName) {
+  return (
+    normalizeText(sheetName) ===
+    normalizeText("2. Krümper-Kompanie")
   );
 }
 
