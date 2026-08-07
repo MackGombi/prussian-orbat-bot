@@ -531,102 +531,24 @@ async function writeKrumperEntryDate({
   const dateValue =
     getCurrentOrbatDate();
 
-  const range =
-    `${safeSheetName}!H${row}`;
-
   await sheets.spreadsheets.values.update({
     spreadsheetId,
-    range,
-    valueInputOption: "USER_ENTERED",
+    range:
+      `${safeSheetName}!H${row}`,
+    valueInputOption: "RAW",
     requestBody: {
       values: [[dateValue]]
     }
   });
 
-  let verifyResponse =
-    await sheets.spreadsheets.values.get({
-      spreadsheetId,
-      range
-    });
-
-  let storedDate = String(
-    verifyResponse.data.values?.[0]?.[0] || ""
-  ).trim();
-
-  if (!storedDate) {
-    console.warn(
-      "KRUMPER ENTRY DATE WAS BLANK AFTER FIRST WRITE. RETRYING:",
-      {
-        sheetName,
-        row,
-        date: dateValue
-      }
-    );
-
-    await sheets.spreadsheets.values.update({
-      spreadsheetId,
-      range,
-      valueInputOption: "RAW",
-      requestBody: {
-        values: [[dateValue]]
-      }
-    });
-
-    verifyResponse =
-      await sheets.spreadsheets.values.get({
-        spreadsheetId,
-        range
-      });
-
-    storedDate = String(
-      verifyResponse.data.values?.[0]?.[0] || ""
-    ).trim();
-  }
-
-  if (!storedDate) {
-    throw new Error(
-      `KRUMPER_DATE_WRITE_FAILED: Google Sheets returned a blank value for ${sheetName}!H${row}.`
-    );
-  }
-
   console.log(
-    "KRUMPER ENTRY DATE VERIFIED:",
+    "KRUMPER ENTRY DATE WRITTEN:",
     {
       sheetName,
       row,
-      requestedDate: dateValue,
-      storedDate
+      date: dateValue
     }
   );
-}
-
-async function verifyKrumperDateCleared({
-  spreadsheetId,
-  sheetName,
-  row
-}) {
-  const safeSheetName =
-    escapeSheetName(sheetName);
-
-  const range =
-    `${safeSheetName}!H${row}`;
-
-  const response =
-    await sheets.spreadsheets.values.get({
-      spreadsheetId,
-      range
-    });
-
-  const value = String(
-    response.data.values?.[0]?.[0] || ""
-  ).trim();
-
-  if (value) {
-    await sheets.spreadsheets.values.clear({
-      spreadsheetId,
-      range
-    });
-  }
 }
 
 function isSecondKrumperCompany(sheetName) {
@@ -638,6 +560,162 @@ function isSecondKrumperCompany(sheetName) {
 
 function isMusketierCompany(sheetName) {
   return normalizeText(sheetName).includes("musketier");
+}
+
+/*
+|--------------------------------------------------------------------------
+| Attendance rules
+|--------------------------------------------------------------------------
+|
+| Standard eligible companies:
+| Monday H, Tuesday I, Wednesday J, Thursday K,
+| Friday L, Saturday M, Sunday N.
+|
+| 2. Krümper-Kompanie:
+| Saturday H, Sunday I only.
+|--------------------------------------------------------------------------
+*/
+
+const ATTENDANCE_DAYS = [
+  "Monday",
+  "Tuesday",
+  "Wednesday",
+  "Thursday",
+  "Friday",
+  "Saturday",
+  "Sunday"
+];
+
+const STANDARD_ATTENDANCE_COLUMNS = new Map([
+  ["monday", "H"],
+  ["tuesday", "I"],
+  ["wednesday", "J"],
+  ["thursday", "K"],
+  ["friday", "L"],
+  ["saturday", "M"],
+  ["sunday", "N"]
+]);
+
+const SECOND_KRUMPER_ATTENDANCE_COLUMNS = new Map([
+  ["saturday", "H"],
+  ["sunday", "I"]
+]);
+
+/*
+ * These are the Discord attendance-status dropdown options.
+ * If your Google Sheets dropdown uses different exact wording,
+ * only change these values here and in deploy-commands.js.
+ */
+const ATTENDANCE_STATUS_CHOICES = [
+  "Present",
+  "Absent",
+  "Excused",
+  "LOA"
+];
+
+function isGeneralstabOrCommandSheet(sheetName) {
+  const normalized =
+    normalizeText(sheetName);
+
+  return (
+    normalized.includes("generalstab") ||
+    TWO_ROW_COMMAND_SHEETS.has(
+      String(sheetName || "").trim()
+    )
+  );
+}
+
+function isAttendanceExcludedCompany(sheetName) {
+  return (
+    isGeneralstabOrCommandSheet(sheetName) ||
+    normalizeText(sheetName) ===
+      normalizeText(GARNISON_SHEET_NAME) ||
+    isFirstKrumperCompany(sheetName)
+  );
+}
+
+function getAttendanceColumn(sheetName, day) {
+  const normalizedDay =
+    normalizeText(day);
+
+  if (isAttendanceExcludedCompany(sheetName)) {
+    throw new Error(
+      "ATTENDANCE_NOT_ALLOWED_FOR_COMPANY"
+    );
+  }
+
+  if (isSecondKrumperCompany(sheetName)) {
+    const column =
+      SECOND_KRUMPER_ATTENDANCE_COLUMNS.get(
+        normalizedDay
+      );
+
+    if (!column) {
+      throw new Error(
+        "SECOND_KRUMPER_WEEKEND_ONLY"
+      );
+    }
+
+    return column;
+  }
+
+  const column =
+    STANDARD_ATTENDANCE_COLUMNS.get(
+      normalizedDay
+    );
+
+  if (!column) {
+    throw new Error(
+      "INVALID_ATTENDANCE_DAY"
+    );
+  }
+
+  return column;
+}
+
+async function setAttendanceMarker({
+  spreadsheetId,
+  sheetName,
+  row,
+  day,
+  attendance
+}) {
+  const column =
+    getAttendanceColumn(
+      sheetName,
+      day
+    );
+
+  const safeSheetName =
+    escapeSheetName(sheetName);
+
+  const range =
+    `${safeSheetName}!${column}${row}`;
+
+  const previousResponse =
+    await sheets.spreadsheets.values.get({
+      spreadsheetId,
+      range
+    });
+
+  const previousValue = String(
+    previousResponse.data.values?.[0]?.[0] || ""
+  ).trim();
+
+  await sheets.spreadsheets.values.update({
+    spreadsheetId,
+    range,
+    valueInputOption: "USER_ENTERED",
+    requestBody: {
+      values: [[attendance]]
+    }
+  });
+
+  return {
+    column,
+    range: `${column}${row}`,
+    previousValue
+  };
 }
 
 function assertCompanyRankAllowed(sheetName, rank) {
@@ -1152,12 +1230,6 @@ async function removeMemberFromSheet({
     }
   });
 
-  await verifyKrumperDateCleared({
-    spreadsheetId,
-    sheetName,
-    row
-  });
-
   console.log(
     "ORBAT ROW CLEARED:",
     {
@@ -1505,10 +1577,23 @@ async function handleCompanyAutocomplete(interaction) {
 
   const regiment = resolveRegiment(regimentValue);
 
-  const companies =
+  let companies =
     await getCompanySheetNames(
       regiment
     );
+
+  if (
+    interaction.commandName ===
+    "attendance"
+  ) {
+    companies =
+      companies.filter(
+        company =>
+          !isAttendanceExcludedCompany(
+            company
+          )
+      );
+  }
 
   const searchText = normalizeText(
     focused.value
@@ -1528,6 +1613,59 @@ async function handleCompanyAutocomplete(interaction) {
   await interaction.respond(suggestions);
 }
 
+
+
+async function handleAttendanceDayAutocomplete(
+  interaction
+) {
+  const focused =
+    interaction.options.getFocused(true);
+
+  if (focused.name !== "day") {
+    await interaction.respond([]);
+    return;
+  }
+
+  const company =
+    interaction.options.getString(
+      "company"
+    );
+
+  if (!company) {
+    await interaction.respond([]);
+    return;
+  }
+
+  if (isAttendanceExcludedCompany(company)) {
+    await interaction.respond([]);
+    return;
+  }
+
+  const availableDays =
+    isSecondKrumperCompany(company)
+      ? ["Saturday", "Sunday"]
+      : ATTENDANCE_DAYS;
+
+  const searchText =
+    normalizeText(focused.value);
+
+  const suggestions =
+    availableDays
+      .filter(day =>
+        !searchText ||
+        normalizeText(day).includes(
+          searchText
+        )
+      )
+      .map(day => ({
+        name: day,
+        value: day
+      }));
+
+  await interaction.respond(
+    suggestions
+  );
+}
 
 
 /*
@@ -1762,20 +1900,40 @@ client.on(
   Events.InteractionCreate,
   async interaction => {
     if (interaction.isAutocomplete()) {
-      if (
-        interaction.commandName !== "addmember" &&
-        interaction.commandName !== "transfer"
-      ) {
+      const isCompanyAutocompleteCommand =
+        interaction.commandName ===
+          "addmember" ||
+        interaction.commandName ===
+          "transfer" ||
+        interaction.commandName ===
+          "attendance";
+
+      if (!isCompanyAutocompleteCommand) {
         return;
       }
 
       try {
-        await handleCompanyAutocomplete(
-          interaction
-        );
+        const focused =
+          interaction.options.getFocused(
+            true
+          );
+
+        if (
+          interaction.commandName ===
+            "attendance" &&
+          focused.name === "day"
+        ) {
+          await handleAttendanceDayAutocomplete(
+            interaction
+          );
+        } else {
+          await handleCompanyAutocomplete(
+            interaction
+          );
+        }
       } catch (error) {
         console.error(
-          "Company autocomplete failed:"
+          "Autocomplete failed:"
         );
         console.error(error);
 
@@ -1797,7 +1955,8 @@ client.on(
       interaction.commandName !== "addmember" &&
       interaction.commandName !== "removemember" &&
       interaction.commandName !== "rank" &&
-      interaction.commandName !== "transfer"
+      interaction.commandName !== "transfer" &&
+      interaction.commandName !== "attendance"
     ) {
       return;
     }
@@ -1812,6 +1971,327 @@ client.on(
         flags: MessageFlags.Ephemeral
       });
       return;
+    }
+
+    if (interaction.commandName === "attendance") {
+      try {
+        await interaction.deferReply({
+          flags: MessageFlags.Ephemeral
+        });
+
+        const discordMember =
+          interaction.options.getUser(
+            "discord_member",
+            true
+          );
+
+        const regimentValue =
+          interaction.options
+            .getString(
+              "regiment",
+              true
+            )
+            .trim();
+
+        const company =
+          interaction.options
+            .getString(
+              "company",
+              true
+            )
+            .trim();
+
+        const day =
+          interaction.options
+            .getString(
+              "day",
+              true
+            )
+            .trim();
+
+        const attendance =
+          interaction.options
+            .getString(
+              "attendance",
+              true
+            )
+            .trim();
+
+        const regiment =
+          resolveRegiment(
+            regimentValue
+          );
+
+        const availableCompanies =
+          await getCompanySheetNames(
+            regiment
+          );
+
+        const matchedCompany =
+          availableCompanies.find(
+            availableCompany =>
+              normalizeText(
+                availableCompany
+              ) ===
+              normalizeText(company)
+          );
+
+        if (!matchedCompany) {
+          await interaction.editReply(
+            [
+              "The selected company could not be found.",
+              "",
+              `**Regiment:** ${regiment.displayName}`,
+              `**Company Submitted:** ${company}`,
+              "",
+              "Select the company from autocomplete and try again."
+            ].join("\n")
+          );
+          return;
+        }
+
+        if (
+          isAttendanceExcludedCompany(
+            matchedCompany
+          )
+        ) {
+          await interaction.editReply(
+            [
+              "Attendance cannot be recorded for that sheet.",
+              "",
+              `**Company:** ${matchedCompany}`,
+              "",
+              "Attendance is disabled for Generalstab/command sheets, Garnison Kompanie, and 1. Krümper-Kompanie."
+            ].join("\n")
+          );
+          return;
+        }
+
+        if (
+          !ATTENDANCE_STATUS_CHOICES
+            .some(
+              value =>
+                normalizeText(value) ===
+                normalizeText(attendance)
+            )
+        ) {
+          await interaction.editReply(
+            "That attendance status is not configured."
+          );
+          return;
+        }
+
+        let attendanceColumn;
+
+        try {
+          attendanceColumn =
+            getAttendanceColumn(
+              matchedCompany,
+              day
+            );
+        } catch (attendanceError) {
+          if (
+            attendanceError?.message ===
+            "SECOND_KRUMPER_WEEKEND_ONLY"
+          ) {
+            await interaction.editReply(
+              [
+                "2. Krümper-Kompanie only records attendance on Saturday and Sunday.",
+                "",
+                "**Saturday:** Column H",
+                "**Sunday:** Column I"
+              ].join("\n")
+            );
+            return;
+          }
+
+          if (
+            attendanceError?.message ===
+            "ATTENDANCE_NOT_ALLOWED_FOR_COMPANY"
+          ) {
+            await interaction.editReply(
+              "Attendance cannot be recorded for that company."
+            );
+            return;
+          }
+
+          await interaction.editReply(
+            "The selected attendance day is invalid."
+          );
+          return;
+        }
+
+        const existingMember =
+          await findMemberByDiscordId(
+            discordMember.id
+          );
+
+        if (!existingMember) {
+          await interaction.editReply(
+            [
+              "That Discord member was not found in the Grand ORBAT.",
+              "",
+              `**Discord Member:** ${discordMember}`,
+              `**Discord ID:** ${discordMember.id}`,
+              "",
+              "No attendance was changed."
+            ].join("\n")
+          );
+          return;
+        }
+
+        const sameRegiment =
+          existingMember.regiment
+            .spreadsheetId ===
+          regiment.spreadsheetId;
+
+        const sameCompany =
+          normalizeText(
+            existingMember.companyName
+          ) ===
+          normalizeText(
+            matchedCompany
+          );
+
+        if (
+          !sameRegiment ||
+          !sameCompany
+        ) {
+          await interaction.editReply(
+            [
+              "That member is not assigned to the selected regiment/company.",
+              "",
+              `**Selected Regiment:** ${regiment.displayName}`,
+              `**Selected Company:** ${matchedCompany}`,
+              "",
+              `**Actual Regiment:** ${existingMember.regiment.displayName}`,
+              `**Actual Company:** ${existingMember.companyName}`,
+              `**Actual Row:** ${existingMember.row}`,
+              "",
+              "No attendance was changed."
+            ].join("\n")
+          );
+          return;
+        }
+
+        const memberRecord =
+          await getMemberRecord({
+            spreadsheetId:
+              regiment.spreadsheetId,
+            sheetName:
+              matchedCompany,
+            row:
+              existingMember.row
+          });
+
+        const attendanceResult =
+          await setAttendanceMarker({
+            spreadsheetId:
+              regiment.spreadsheetId,
+            sheetName:
+              matchedCompany,
+            row:
+              existingMember.row,
+            day,
+            attendance
+          });
+
+        await sendOrbatLog({
+          interaction,
+          category: "Attendance",
+          action: "Attendance Updated",
+          affectedMember:
+            discordMember,
+          robloxUsername:
+            memberRecord.robloxUsername,
+          changes: [
+            {
+              label: "Regiment",
+              after:
+                regiment.displayName
+            },
+            {
+              label: "Company",
+              after:
+                matchedCompany
+            },
+            {
+              label: "Day",
+              after:
+                day
+            },
+            {
+              label: "Attendance",
+              before:
+                attendanceResult.previousValue ||
+                "Blank",
+              after:
+                attendance
+            },
+            {
+              label: "Cell",
+              after:
+                attendanceResult.range
+            }
+          ]
+        });
+
+        await interaction.editReply(
+          [
+            "Attendance updated successfully.",
+            "",
+            `**Discord Member:** ${discordMember}`,
+            `**Roblox Username:** ${memberRecord.robloxUsername || "Not set"}`,
+            `**Regiment:** ${regiment.displayName}`,
+            `**Company:** ${matchedCompany}`,
+            `**Day:** ${day}`,
+            `**Attendance:** ${attendance}`,
+            `**Spreadsheet Cell:** ${attendanceResult.range}`,
+            "",
+            isSecondKrumperCompany(
+              matchedCompany
+            )
+              ? "2. Krümper-Kompanie uses H for Saturday and I for Sunday."
+              : `${day} uses column ${attendanceColumn}.`
+          ].join("\n")
+        );
+
+        return;
+      } catch (error) {
+        console.error(
+          "Failed to update attendance:"
+        );
+        console.error(error);
+
+        const errorMessage =
+          error?.message ||
+          "Unknown attendance error.";
+
+        try {
+          if (
+            interaction.deferred ||
+            interaction.replied
+          ) {
+            await interaction.editReply(
+              `Attendance could not be updated: ${errorMessage}`
+            );
+          } else {
+            await interaction.reply({
+              content:
+                `Attendance could not be updated: ${errorMessage}`,
+              flags:
+                MessageFlags.Ephemeral
+            });
+          }
+        } catch (replyError) {
+          console.error(
+            "Failed to send attendance error reply:"
+          );
+          console.error(replyError);
+        }
+
+        return;
+      }
     }
 
     if (interaction.commandName === "transfer") {

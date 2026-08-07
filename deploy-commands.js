@@ -90,6 +90,19 @@ const RANK_CHOICES = [
   { name: "Oberst", value: "Oberst" }
 ];
 
+/*
+ * IMPORTANT:
+ * These must match the exact text used by the Google Sheets attendance
+ * dropdown. If your sheet uses different wording, change only this list
+ * and the ATTENDANCE_STATUS_CHOICES list in index.js.
+ */
+const ATTENDANCE_CHOICES = [
+  { name: "Present", value: "Present" },
+  { name: "Absent", value: "Absent" },
+  { name: "Excused", value: "Excused" },
+  { name: "LOA", value: "LOA" }
+];
+
 const commands = [
   new SlashCommandBuilder()
     .setName("addmember")
@@ -222,6 +235,57 @@ const commands = [
         )
         .setRequired(true)
     )
+    .toJSON(),
+
+  new SlashCommandBuilder()
+    .setName("attendance")
+    .setDescription(
+      "Updates a member's weekly attendance marker."
+    )
+    .addUserOption(option =>
+      option
+        .setName("discord_member")
+        .setDescription(
+          "Select the Discord member."
+        )
+        .setRequired(true)
+    )
+    .addStringOption(option =>
+      option
+        .setName("regiment")
+        .setDescription(
+          "Select the member's regiment."
+        )
+        .setRequired(true)
+        .addChoices(...REGIMENT_CHOICES)
+    )
+    .addStringOption(option =>
+      option
+        .setName("company")
+        .setDescription(
+          "Select the member's company."
+        )
+        .setRequired(true)
+        .setAutocomplete(true)
+    )
+    .addStringOption(option =>
+      option
+        .setName("day")
+        .setDescription(
+          "Select the attendance day."
+        )
+        .setRequired(true)
+        .setAutocomplete(true)
+    )
+    .addStringOption(option =>
+      option
+        .setName("attendance")
+        .setDescription(
+          "Select the attendance marker."
+        )
+        .setRequired(true)
+        .addChoices(...ATTENDANCE_CHOICES)
+    )
     .toJSON()
 ];
 
@@ -232,7 +296,7 @@ const rest = new REST({
 async function deployCommands() {
   try {
     console.log(
-      "Registering /addmember, /transfer, /rank, and /removemember..."
+      "Registering /addmember, /transfer, /rank, /removemember, and /attendance..."
     );
 
     await rest.put(
