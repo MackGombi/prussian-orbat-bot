@@ -607,10 +607,14 @@ const SECOND_KRUMPER_ATTENDANCE_COLUMNS = new Map([
  * only change these values here and in deploy-commands.js.
  */
 const ATTENDANCE_STATUS_CHOICES = [
-  "Present",
-  "Absent",
-  "Excused",
-  "LOA"
+  "DM",
+  "RSVP",
+  "MAYB",
+  "NO",
+  "PRES",
+  "EXC",
+  "AWOL",
+  "LEFT"
 ];
 
 function isGeneralstabOrCommandSheet(sheetName) {

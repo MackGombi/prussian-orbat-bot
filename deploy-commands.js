@@ -97,10 +97,14 @@ const RANK_CHOICES = [
  * and the ATTENDANCE_STATUS_CHOICES list in index.js.
  */
 const ATTENDANCE_CHOICES = [
-  { name: "Present", value: "Present" },
-  { name: "Absent", value: "Absent" },
-  { name: "Excused", value: "Excused" },
-  { name: "LOA", value: "LOA" }
+  { name: "DM", value: "DM" },
+  { name: "RSVP", value: "RSVP" },
+  { name: "MAYB", value: "MAYB" },
+  { name: "NO", value: "NO" },
+  { name: "PRES", value: "PRES" },
+  { name: "EXC", value: "EXC" },
+  { name: "AWOL", value: "AWOL" },
+  { name: "LEFT", value: "LEFT" }
 ];
 
 const commands = [
