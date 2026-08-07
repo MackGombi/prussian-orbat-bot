@@ -675,6 +675,17 @@ async function sortCompanyByRank({
         members[index] || ["", "", "", "", "", ""]
     );
 
+  /*
+   * Column H belongs exclusively to 1. Krümper-Kompanie.
+   * If this is any other company, strip H from every roster row while
+   * preserving C:G. This also cleans up stale dates left by older builds.
+   */
+  if (!isFirstKrumperCompany(sheetName)) {
+    for (const row of rewrittenRows) {
+      row[5] = "";
+    }
+  }
+
   await sheets.spreadsheets.values.update({
     spreadsheetId,
     range:
@@ -1062,6 +1073,15 @@ async function removeMemberFromSheet({
       ]
     }
   });
+
+  console.log(
+    "ORBAT ROW CLEARED:",
+    {
+      sheetName,
+      row,
+      clearedColumns: ["C", "D", "E", "F", "H"]
+    }
+  );
 }
 
 async function updateMemberRank({
@@ -1125,6 +1145,40 @@ async function addMemberToSheet({
       values: [[timezone]]
     }
   ];
+
+  /*
+   * Write the Krümper entry date in the SAME Google Sheets request as
+   * the member data. This guarantees H is populated before any timezone
+   * processing or rank sorting happens.
+   */
+  if (isFirstKrumperCompany(sheetName)) {
+    const entryDate =
+      getCurrentOrbatDate();
+
+    writeData.push({
+      range: `${safeSheetName}!H${row}`,
+      values: [[entryDate]]
+    });
+
+    console.log(
+      "KRUMPER ENTRY DATE QUEUED:",
+      {
+        sheetName,
+        row,
+        date: entryDate
+      }
+    );
+  } else {
+    /*
+     * A date must NEVER follow a member into another company.
+     * Explicitly blank H on every non-1. Krümper-Kompanie write in case
+     * that roster slot contains stale data from an older bot version.
+     */
+    writeData.push({
+      range: `${safeSheetName}!H${row}`,
+      values: [[""]]
+    });
+  }
 
   await sheets.spreadsheets.values.batchUpdate({
     spreadsheetId,
