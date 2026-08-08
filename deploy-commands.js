@@ -242,6 +242,31 @@ const commands = [
     .toJSON(),
 
   new SlashCommandBuilder()
+    .setName("orginize")
+    .setDescription(
+      "Organizes a company roster from highest rank to lowest rank."
+    )
+    .addStringOption(option =>
+      option
+        .setName("regiment")
+        .setDescription(
+          "Select the regiment."
+        )
+        .setRequired(true)
+        .addChoices(...REGIMENT_CHOICES)
+    )
+    .addStringOption(option =>
+      option
+        .setName("company")
+        .setDescription(
+          "Select the company to organize."
+        )
+        .setRequired(true)
+        .setAutocomplete(true)
+    )
+    .toJSON(),
+
+  new SlashCommandBuilder()
     .setName("attendance")
     .setDescription(
       "Starts a multi-member company attendance entry."
@@ -274,7 +299,7 @@ const rest = new REST({
 async function deployCommands() {
   try {
     console.log(
-      "Registering /addmember, /transfer, /rank, /removemember, and /attendance..."
+      "Registering /addmember, /transfer, /rank, /removemember, /attendance, and /orginize..."
     );
 
     await rest.put(

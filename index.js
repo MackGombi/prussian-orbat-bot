@@ -2789,7 +2789,9 @@ client.on(
         interaction.commandName ===
           "transfer" ||
         interaction.commandName ===
-          "attendance";
+          "attendance" ||
+        interaction.commandName ===
+          "orginize";
 
       if (!isCompanyAutocompleteCommand) {
         return;
@@ -2870,7 +2872,8 @@ client.on(
       interaction.commandName !== "removemember" &&
       interaction.commandName !== "rank" &&
       interaction.commandName !== "transfer" &&
-      interaction.commandName !== "attendance"
+      interaction.commandName !== "attendance" &&
+      interaction.commandName !== "orginize"
     ) {
       return;
     }
@@ -2885,6 +2888,153 @@ client.on(
         flags: MessageFlags.Ephemeral
       });
       return;
+    }
+
+    if (interaction.commandName === "orginize") {
+      try {
+        await interaction.deferReply({
+          flags:
+            MessageFlags.Ephemeral
+        });
+
+        const regimentValue =
+          interaction.options
+            .getString(
+              "regiment",
+              true
+            )
+            .trim();
+
+        const company =
+          interaction.options
+            .getString(
+              "company",
+              true
+            )
+            .trim();
+
+        const regiment =
+          resolveRegiment(
+            regimentValue
+          );
+
+        const availableCompanies =
+          await getCompanySheetNames(
+            regiment
+          );
+
+        const matchedCompany =
+          availableCompanies.find(
+            availableCompany =>
+              normalizeText(
+                availableCompany
+              ) ===
+              normalizeText(company)
+          );
+
+        if (!matchedCompany) {
+          await interaction.editReply(
+            [
+              "The selected company could not be found.",
+              "",
+              `**Regiment:** ${regiment.displayName}`,
+              `**Company Submitted:** ${company}`,
+              "",
+              "Select an actual company from autocomplete and try again."
+            ].join("\n")
+          );
+          return;
+        }
+
+        const memberCount =
+          await sortCompanyByRank({
+            spreadsheetId:
+              regiment.spreadsheetId,
+            sheetName:
+              matchedCompany
+          });
+
+        await sendOrbatLog({
+          interaction,
+          category:
+            "Organization",
+          action:
+            "Company Organized by Rank",
+          affectedMember:
+            null,
+          robloxUsername:
+            `${memberCount} member(s)`,
+          changes: [
+            {
+              label: "Regiment",
+              after:
+                regiment.displayName
+            },
+            {
+              label: "Company",
+              after:
+                matchedCompany
+            },
+            {
+              label:
+                "Members Organized",
+              after:
+                String(memberCount)
+            }
+          ],
+          notes:
+            "Company roster was sorted from highest rank to lowest rank. Attendance stayed attached to each member."
+        });
+
+        await interaction.editReply(
+          [
+            "**Company Organized**",
+            "",
+            `**Regiment:** ${regiment.displayName}`,
+            `**Company:** ${matchedCompany}`,
+            `**Members Organized:** ${memberCount}`,
+            "",
+            "The company has been sorted from highest rank to lowest rank.",
+            "Attendance and other member-owned row data stayed with each member."
+          ].join("\n")
+        );
+
+        return;
+      } catch (error) {
+        console.error(
+          "Failed to organize company:"
+        );
+        console.error(error);
+
+        const errorMessage =
+          error?.message ||
+          "Unknown organization error.";
+
+        try {
+          if (
+            interaction.deferred ||
+            interaction.replied
+          ) {
+            await interaction.editReply(
+              `The company could not be organized: ${errorMessage}`
+            );
+          } else {
+            await interaction.reply({
+              content:
+                `The company could not be organized: ${errorMessage}`,
+              flags:
+                MessageFlags.Ephemeral
+            });
+          }
+        } catch (replyError) {
+          console.error(
+            "Failed to send organize error reply:"
+          );
+          console.error(replyError);
+        }
+
+        return;
+      }
     }
 
     if (interaction.commandName === "attendance") {
