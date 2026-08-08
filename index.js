@@ -1801,13 +1801,15 @@ async function handleAttendanceDayAutocomplete(
 | 1. Regiment
 | 2. Company
 | 3. Day
-| 4. Add as many Discord members as needed (25 per selection batch)
+| 4. Select up to 15 Discord members total
 | 5. Choose one attendance status for the whole selected group
 |--------------------------------------------------------------------------
 */
 
 const ATTENDANCE_SESSION_TTL_MS =
   10 * 60 * 1000;
+
+const ATTENDANCE_MAX_MEMBERS = 15;
 
 const attendanceSessions =
   new Map();
@@ -1921,16 +1923,37 @@ function buildAttendanceDayComponents(
 function buildAttendanceMemberComponents(
   session
 ) {
-  const userMenu =
-    new UserSelectMenuBuilder()
-      .setCustomId(
-        `attendance_users:${session.token}`
-      )
-      .setPlaceholder(
-        "Select up to 25 members to add"
-      )
-      .setMinValues(1)
-      .setMaxValues(25);
+  const remaining =
+    Math.max(
+      0,
+      ATTENDANCE_MAX_MEMBERS -
+      session.userIds.size
+    );
+
+  const rows = [];
+
+  if (remaining > 0) {
+    const userMenu =
+      new UserSelectMenuBuilder()
+        .setCustomId(
+          `attendance_users:${session.token}`
+        )
+        .setPlaceholder(
+          `Select members (${remaining} remaining)`
+        )
+        .setMinValues(1)
+        .setMaxValues(
+          Math.min(
+            ATTENDANCE_MAX_MEMBERS,
+            remaining
+          )
+        );
+
+    rows.push(
+      new ActionRowBuilder()
+        .addComponents(userMenu)
+    );
+  }
 
   const continueButton =
     new ButtonBuilder()
@@ -1964,16 +1987,16 @@ function buildAttendanceMemberComponents(
       .setLabel("Cancel")
       .setStyle(ButtonStyle.Danger);
 
-  return [
-    new ActionRowBuilder()
-      .addComponents(userMenu),
+  rows.push(
     new ActionRowBuilder()
       .addComponents(
         continueButton,
         clearButton,
         cancelButton
       )
-  ];
+  );
+
+  return rows;
 }
 
 function buildAttendanceStatusComponents(
@@ -2140,8 +2163,8 @@ async function handleAttendanceComponent(
           session
         ),
         "",
-        "Select members below. Each selection can add up to 25 members.",
-        "You can use the selector repeatedly to keep adding more members.",
+        `Select up to **${ATTENDANCE_MAX_MEMBERS}** members total.`,
+        "You may use the selector again until the 15-member limit is reached.",
         "When everyone is selected, click **Continue**."
       ].join("\n"),
       components:
@@ -2157,12 +2180,30 @@ async function handleAttendanceComponent(
     action ===
     "attendance_users"
   ) {
+    const beforeCount =
+      session.userIds.size;
+
     for (
       const userId of
       interaction.values || []
     ) {
+      if (
+        session.userIds.size >=
+        ATTENDANCE_MAX_MEMBERS
+      ) {
+        break;
+      }
+
       session.userIds.add(userId);
     }
+
+    const addedCount =
+      session.userIds.size -
+      beforeCount;
+
+    const atLimit =
+      session.userIds.size >=
+      ATTENDANCE_MAX_MEMBERS;
 
     await interaction.update({
       content: [
@@ -2170,8 +2211,10 @@ async function handleAttendanceComponent(
           session
         ),
         "",
-        `Added the selected batch. **${session.userIds.size}** unique member(s) are now selected.`,
-        "Use the selector again to add another batch, or click **Continue**."
+        `Added **${addedCount}** member(s). **${session.userIds.size}/${ATTENDANCE_MAX_MEMBERS}** selected.`,
+        atLimit
+          ? "The 15-member limit has been reached. Click **Continue** to choose attendance."
+          : "Select more members or click **Continue**."
       ].join("\n"),
       components:
         buildAttendanceMemberComponents(
@@ -2237,6 +2280,19 @@ async function handleAttendanceComponent(
       await interaction.reply({
         content:
           "Select at least one member before continuing.",
+        flags:
+          MessageFlags.Ephemeral
+      });
+      return true;
+    }
+
+    if (
+      session.userIds.size >
+      ATTENDANCE_MAX_MEMBERS
+    ) {
+      await interaction.reply({
+        content:
+          `Attendance is limited to ${ATTENDANCE_MAX_MEMBERS} members at a time.`,
         flags:
           MessageFlags.Ephemeral
       });
