@@ -1290,27 +1290,60 @@ async function removeMemberFromSheet({
   sheetName,
   row
 }) {
-  const safeSheetName = escapeSheetName(sheetName);
+  const safeSheetName =
+    escapeSheetName(sheetName);
 
   /*
-   * Clear only the fields managed by this bot:
-   * C = Roblox username
-   * D = Discord ID
-   * E = rank
-   * F = timezone
+   * When a member LEAVES a company, only C:F is transferable member
+   * information. Attendance must stay company-specific and therefore
+   * must be erased from the old company.
    *
-   * The row itself is not deleted, preserving sheet formatting and formulas.
+   * Normal attendance companies:
+   *   H:N = Monday-Sunday attendance -> clear all.
+   *
+   * 2. Krümper-Kompanie:
+   *   H:I = Saturday-Sunday attendance -> clear both.
+   *
+   * 1. Krümper-Kompanie:
+   *   H = entry date -> clear it when the member leaves.
+   *
+   * Generalstab / Garnison / other excluded sheets:
+   *   no attendance markers are transferred.
+   *
+   * Column G is internal timezone storage and is cleaned by the
+   * subsequent company sort; it is never copied to the destination.
    */
+  const ranges = [
+    `${safeSheetName}!C${row}`,
+    `${safeSheetName}!D${row}`,
+    `${safeSheetName}!E${row}`,
+    `${safeSheetName}!F${row}`
+  ];
+
+  if (isFirstKrumperCompany(sheetName)) {
+    ranges.push(
+      `${safeSheetName}!H${row}`
+    );
+  } else if (
+    isSecondKrumperCompany(sheetName)
+  ) {
+    ranges.push(
+      `${safeSheetName}!H${row}:I${row}`
+    );
+  } else if (
+    !isAttendanceExcludedCompany(
+      sheetName
+    )
+  ) {
+    ranges.push(
+      `${safeSheetName}!H${row}:N${row}`
+    );
+  }
+
   await sheets.spreadsheets.values.batchClear({
     spreadsheetId,
     requestBody: {
-      ranges: [
-        `${safeSheetName}!C${row}`,
-        `${safeSheetName}!D${row}`,
-        `${safeSheetName}!E${row}`,
-        `${safeSheetName}!F${row}`,
-        `${safeSheetName}!H${row}`
-      ]
+      ranges
     }
   });
 
@@ -1319,7 +1352,8 @@ async function removeMemberFromSheet({
     {
       sheetName,
       row,
-      clearedColumns: ["C", "D", "E", "F", "H"]
+      transferredColumns: ["C", "D", "E", "F"],
+      clearedRanges: ranges
     }
   );
 }
@@ -2673,6 +2707,11 @@ client.on(
           return;
         }
 
+        /*
+         * Cross-company / cross-regiment transfers intentionally copy
+         * ONLY the member data represented by C:F. Attendance markers
+         * are company-specific and are NOT copied to the destination.
+         */
         let destinationRow =
           await addMemberToSheet({
             spreadsheetId:
