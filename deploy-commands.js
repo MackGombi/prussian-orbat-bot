@@ -244,21 +244,13 @@ const commands = [
   new SlashCommandBuilder()
     .setName("attendance")
     .setDescription(
-      "Updates a member's weekly attendance marker."
-    )
-    .addUserOption(option =>
-      option
-        .setName("discord_member")
-        .setDescription(
-          "Select the Discord member."
-        )
-        .setRequired(true)
+      "Starts a multi-member company attendance entry."
     )
     .addStringOption(option =>
       option
         .setName("regiment")
         .setDescription(
-          "Select the member's regiment."
+          "Select the regiment."
         )
         .setRequired(true)
         .addChoices(...REGIMENT_CHOICES)
@@ -267,28 +259,10 @@ const commands = [
       option
         .setName("company")
         .setDescription(
-          "Select the member's company."
+          "Select the company."
         )
         .setRequired(true)
         .setAutocomplete(true)
-    )
-    .addStringOption(option =>
-      option
-        .setName("day")
-        .setDescription(
-          "Select the attendance day."
-        )
-        .setRequired(true)
-        .setAutocomplete(true)
-    )
-    .addStringOption(option =>
-      option
-        .setName("attendance")
-        .setDescription(
-          "Select the attendance marker."
-        )
-        .setRequired(true)
-        .addChoices(...ATTENDANCE_CHOICES)
     )
     .toJSON()
 ];
@@ -325,4 +299,4 @@ async function deployCommands() {
   }
 }
 
-deployCommands();// attendance choices redeploy
+deployCommands();

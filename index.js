@@ -2,11 +2,16 @@ import "dotenv/config";
 
 import fs from "node:fs";
 import {
+  ActionRowBuilder,
+  ButtonBuilder,
+  ButtonStyle,
   Client,
   EmbedBuilder,
   Events,
   GatewayIntentBits,
-  MessageFlags
+  MessageFlags,
+  StringSelectMenuBuilder,
+  UserSelectMenuBuilder
 } from "discord.js";
 import { google } from "googleapis";
 
@@ -1786,6 +1791,710 @@ async function handleAttendanceDayAutocomplete(
 }
 
 
+
+/*
+|--------------------------------------------------------------------------
+| Multi-member attendance sessions
+|--------------------------------------------------------------------------
+|
+| /attendance now works as:
+| 1. Regiment
+| 2. Company
+| 3. Day
+| 4. Add as many Discord members as needed (25 per selection batch)
+| 5. Choose one attendance status for the whole selected group
+|--------------------------------------------------------------------------
+*/
+
+const ATTENDANCE_SESSION_TTL_MS =
+  10 * 60 * 1000;
+
+const attendanceSessions =
+  new Map();
+
+function createAttendanceSessionToken(
+  interaction
+) {
+  return (
+    `${interaction.id}-${Date.now()}`
+      .replace(/[^a-zA-Z0-9_-]/g, "")
+      .slice(-70)
+  );
+}
+
+function getAttendanceSession(
+  token,
+  interaction
+) {
+  const session =
+    attendanceSessions.get(token);
+
+  if (!session) {
+    return null;
+  }
+
+  if (
+    session.expiresAt < Date.now()
+  ) {
+    attendanceSessions.delete(token);
+    return null;
+  }
+
+  if (
+    session.ownerId !==
+    interaction.user.id
+  ) {
+    return null;
+  }
+
+  if (
+    session.guildId &&
+    interaction.guildId &&
+    session.guildId !==
+      interaction.guildId
+  ) {
+    return null;
+  }
+
+  return session;
+}
+
+function scheduleAttendanceSessionExpiry(
+  token
+) {
+  setTimeout(() => {
+    const session =
+      attendanceSessions.get(token);
+
+    if (
+      session &&
+      session.expiresAt <= Date.now()
+    ) {
+      attendanceSessions.delete(token);
+    }
+  }, ATTENDANCE_SESSION_TTL_MS + 1000);
+}
+
+function buildAttendanceDayComponents(
+  session
+) {
+  const availableDays =
+    isSecondKrumperCompany(
+      session.company
+    )
+      ? ["Saturday", "Sunday"]
+      : ATTENDANCE_DAYS;
+
+  const dayMenu =
+    new StringSelectMenuBuilder()
+      .setCustomId(
+        `attendance_day:${session.token}`
+      )
+      .setPlaceholder(
+        "Choose the attendance day"
+      )
+      .setMinValues(1)
+      .setMaxValues(1)
+      .addOptions(
+        availableDays.map(day => ({
+          label: day,
+          value: day
+        }))
+      );
+
+  const cancelButton =
+    new ButtonBuilder()
+      .setCustomId(
+        `attendance_cancel:${session.token}`
+      )
+      .setLabel("Cancel")
+      .setStyle(ButtonStyle.Danger);
+
+  return [
+    new ActionRowBuilder()
+      .addComponents(dayMenu),
+    new ActionRowBuilder()
+      .addComponents(cancelButton)
+  ];
+}
+
+function buildAttendanceMemberComponents(
+  session
+) {
+  const userMenu =
+    new UserSelectMenuBuilder()
+      .setCustomId(
+        `attendance_users:${session.token}`
+      )
+      .setPlaceholder(
+        "Select up to 25 members to add"
+      )
+      .setMinValues(1)
+      .setMaxValues(25);
+
+  const continueButton =
+    new ButtonBuilder()
+      .setCustomId(
+        `attendance_continue:${session.token}`
+      )
+      .setLabel(
+        `Continue (${session.userIds.size})`
+      )
+      .setStyle(ButtonStyle.Success)
+      .setDisabled(
+        session.userIds.size === 0
+      );
+
+  const clearButton =
+    new ButtonBuilder()
+      .setCustomId(
+        `attendance_clear:${session.token}`
+      )
+      .setLabel("Clear Members")
+      .setStyle(ButtonStyle.Secondary)
+      .setDisabled(
+        session.userIds.size === 0
+      );
+
+  const cancelButton =
+    new ButtonBuilder()
+      .setCustomId(
+        `attendance_cancel:${session.token}`
+      )
+      .setLabel("Cancel")
+      .setStyle(ButtonStyle.Danger);
+
+  return [
+    new ActionRowBuilder()
+      .addComponents(userMenu),
+    new ActionRowBuilder()
+      .addComponents(
+        continueButton,
+        clearButton,
+        cancelButton
+      )
+  ];
+}
+
+function buildAttendanceStatusComponents(
+  session
+) {
+  const statusMenu =
+    new StringSelectMenuBuilder()
+      .setCustomId(
+        `attendance_status:${session.token}`
+      )
+      .setPlaceholder(
+        "Choose attendance for all selected members"
+      )
+      .setMinValues(1)
+      .setMaxValues(1)
+      .addOptions(
+        ATTENDANCE_STATUS_CHOICES.map(
+          status => ({
+            label: status,
+            value: status
+          })
+        )
+      );
+
+  const backButton =
+    new ButtonBuilder()
+      .setCustomId(
+        `attendance_back:${session.token}`
+      )
+      .setLabel("Back to Members")
+      .setStyle(ButtonStyle.Secondary);
+
+  const cancelButton =
+    new ButtonBuilder()
+      .setCustomId(
+        `attendance_cancel:${session.token}`
+      )
+      .setLabel("Cancel")
+      .setStyle(ButtonStyle.Danger);
+
+  return [
+    new ActionRowBuilder()
+      .addComponents(statusMenu),
+    new ActionRowBuilder()
+      .addComponents(
+        backButton,
+        cancelButton
+      )
+  ];
+}
+
+function attendanceSessionHeader(
+  session
+) {
+  return [
+    "**Attendance Entry**",
+    "",
+    `**Regiment:** ${session.regimentDisplayName}`,
+    `**Company:** ${session.company}`,
+    session.day
+      ? `**Day:** ${session.day}`
+      : "**Day:** Not selected",
+    `**Members Selected:** ${session.userIds.size}`
+  ];
+}
+
+async function handleAttendanceComponent(
+  interaction
+) {
+  const customId =
+    String(interaction.customId || "");
+
+  if (
+    !customId.startsWith(
+      "attendance_"
+    )
+  ) {
+    return false;
+  }
+
+  const separatorIndex =
+    customId.indexOf(":");
+
+  if (separatorIndex === -1) {
+    return false;
+  }
+
+  const action =
+    customId.slice(
+      0,
+      separatorIndex
+    );
+
+  const token =
+    customId.slice(
+      separatorIndex + 1
+    );
+
+  const session =
+    getAttendanceSession(
+      token,
+      interaction
+    );
+
+  if (!session) {
+    await interaction.reply({
+      content:
+        "This attendance session expired or belongs to another user. Run `/attendance` again.",
+      flags:
+        MessageFlags.Ephemeral
+    });
+    return true;
+  }
+
+  session.expiresAt =
+    Date.now() +
+    ATTENDANCE_SESSION_TTL_MS;
+
+  if (
+    action ===
+    "attendance_cancel"
+  ) {
+    attendanceSessions.delete(token);
+
+    await interaction.update({
+      content:
+        "Attendance entry cancelled.",
+      components: []
+    });
+
+    return true;
+  }
+
+  if (
+    action ===
+    "attendance_day"
+  ) {
+    const day =
+      interaction.values?.[0];
+
+    try {
+      getAttendanceColumn(
+        session.company,
+        day
+      );
+    } catch (error) {
+      await interaction.reply({
+        content:
+          error?.message ===
+          "SECOND_KRUMPER_WEEKEND_ONLY"
+            ? "2. Krümper-Kompanie only allows Saturday or Sunday."
+            : "That attendance day is not valid for this company.",
+        flags:
+          MessageFlags.Ephemeral
+      });
+      return true;
+    }
+
+    session.day = day;
+
+    await interaction.update({
+      content: [
+        ...attendanceSessionHeader(
+          session
+        ),
+        "",
+        "Select members below. Each selection can add up to 25 members.",
+        "You can use the selector repeatedly to keep adding more members.",
+        "When everyone is selected, click **Continue**."
+      ].join("\n"),
+      components:
+        buildAttendanceMemberComponents(
+          session
+        )
+    });
+
+    return true;
+  }
+
+  if (
+    action ===
+    "attendance_users"
+  ) {
+    for (
+      const userId of
+      interaction.values || []
+    ) {
+      session.userIds.add(userId);
+    }
+
+    await interaction.update({
+      content: [
+        ...attendanceSessionHeader(
+          session
+        ),
+        "",
+        `Added the selected batch. **${session.userIds.size}** unique member(s) are now selected.`,
+        "Use the selector again to add another batch, or click **Continue**."
+      ].join("\n"),
+      components:
+        buildAttendanceMemberComponents(
+          session
+        )
+    });
+
+    return true;
+  }
+
+  if (
+    action ===
+    "attendance_clear"
+  ) {
+    session.userIds.clear();
+
+    await interaction.update({
+      content: [
+        ...attendanceSessionHeader(
+          session
+        ),
+        "",
+        "The member selection was cleared.",
+        "Select members again."
+      ].join("\n"),
+      components:
+        buildAttendanceMemberComponents(
+          session
+        )
+    });
+
+    return true;
+  }
+
+  if (
+    action ===
+    "attendance_back"
+  ) {
+    await interaction.update({
+      content: [
+        ...attendanceSessionHeader(
+          session
+        ),
+        "",
+        "Add more members or continue when ready."
+      ].join("\n"),
+      components:
+        buildAttendanceMemberComponents(
+          session
+        )
+    });
+
+    return true;
+  }
+
+  if (
+    action ===
+    "attendance_continue"
+  ) {
+    if (
+      session.userIds.size === 0
+    ) {
+      await interaction.reply({
+        content:
+          "Select at least one member before continuing.",
+        flags:
+          MessageFlags.Ephemeral
+      });
+      return true;
+    }
+
+    await interaction.update({
+      content: [
+        ...attendanceSessionHeader(
+          session
+        ),
+        "",
+        "Choose the attendance status that should be applied to **all selected members**."
+      ].join("\n"),
+      components:
+        buildAttendanceStatusComponents(
+          session
+        )
+    });
+
+    return true;
+  }
+
+  if (
+    action ===
+    "attendance_status"
+  ) {
+    const attendance =
+      String(
+        interaction.values?.[0] || ""
+      ).trim();
+
+    if (
+      !ATTENDANCE_STATUS_CHOICES.some(
+        value =>
+          normalizeText(value) ===
+          normalizeText(attendance)
+      )
+    ) {
+      await interaction.reply({
+        content:
+          "That attendance status is not configured.",
+        flags:
+          MessageFlags.Ephemeral
+      });
+      return true;
+    }
+
+    await interaction.deferUpdate();
+
+    const updated = [];
+    const skipped = [];
+    const previousValues = [];
+
+    for (
+      const userId of
+      session.userIds
+    ) {
+      try {
+        const row =
+          await findMemberRowInCompanyByDiscordId({
+            spreadsheetId:
+              session.spreadsheetId,
+            sheetName:
+              session.company,
+            discordId:
+              userId
+          });
+
+        if (!row) {
+          skipped.push({
+            userId,
+            reason:
+              "not assigned to the selected company"
+          });
+          continue;
+        }
+
+        const memberRecord =
+          await getMemberRecord({
+            spreadsheetId:
+              session.spreadsheetId,
+            sheetName:
+              session.company,
+            row
+          });
+
+        const attendanceResult =
+          await setAttendanceMarker({
+            spreadsheetId:
+              session.spreadsheetId,
+            sheetName:
+              session.company,
+            row,
+            day:
+              session.day,
+            attendance
+          });
+
+        updated.push({
+          userId,
+          row,
+          robloxUsername:
+            memberRecord.robloxUsername,
+          cell:
+            attendanceResult.range
+        });
+
+        previousValues.push(
+          attendanceResult.previousValue ||
+          "Blank"
+        );
+      } catch (error) {
+        console.error(
+          `Attendance update failed for Discord user ${userId}:`
+        );
+        console.error(error);
+
+        skipped.push({
+          userId,
+          reason:
+            error?.message ||
+            "unknown spreadsheet error"
+        });
+      }
+    }
+
+    attendanceSessions.delete(token);
+
+    await sendOrbatLog({
+      interaction,
+      category: "Attendance",
+      action:
+        "Bulk Attendance Updated",
+      affectedMember: null,
+      robloxUsername:
+        `${updated.length} member(s)`,
+      changes: [
+        {
+          label: "Regiment",
+          after:
+            session.regimentDisplayName
+        },
+        {
+          label: "Company",
+          after:
+            session.company
+        },
+        {
+          label: "Day",
+          after:
+            session.day
+        },
+        {
+          label: "Attendance",
+          after:
+            attendance
+        },
+        {
+          label: "Members Updated",
+          after:
+            String(updated.length)
+        },
+        {
+          label: "Members Skipped",
+          after:
+            String(skipped.length)
+        }
+      ],
+      notes:
+        updated.length > 0
+          ? updated
+              .slice(0, 20)
+              .map(
+                member =>
+                  `<@${member.userId}> → ${member.cell}`
+              )
+              .join("\n")
+          : "No members were updated."
+    });
+
+    const updatedPreview =
+      updated
+        .slice(0, 20)
+        .map(
+          member =>
+            `• <@${member.userId}> — ${member.cell}`
+        );
+
+    const skippedPreview =
+      skipped
+        .slice(0, 15)
+        .map(
+          member =>
+            `• <@${member.userId}> — ${member.reason}`
+        );
+
+    const responseLines = [
+      "**Attendance Updated**",
+      "",
+      `**Regiment:** ${session.regimentDisplayName}`,
+      `**Company:** ${session.company}`,
+      `**Day:** ${session.day}`,
+      `**Attendance:** ${attendance}`,
+      `**Members Updated:** ${updated.length}`,
+      `**Members Skipped:** ${skipped.length}`
+    ];
+
+    if (
+      updatedPreview.length > 0
+    ) {
+      responseLines.push(
+        "",
+        "**Updated:**",
+        ...updatedPreview
+      );
+    }
+
+    if (
+      updated.length >
+      updatedPreview.length
+    ) {
+      responseLines.push(
+        `• …and ${updated.length - updatedPreview.length} more`
+      );
+    }
+
+    if (
+      skippedPreview.length > 0
+    ) {
+      responseLines.push(
+        "",
+        "**Skipped:**",
+        ...skippedPreview
+      );
+    }
+
+    if (
+      skipped.length >
+      skippedPreview.length
+    ) {
+      responseLines.push(
+        `• …and ${skipped.length - skippedPreview.length} more`
+      );
+    }
+
+    await interaction.editReply({
+      content:
+        responseLines.join("\n"),
+      components: []
+    });
+
+    return true;
+  }
+
+  return false;
+}
+
 /*
 |--------------------------------------------------------------------------
 | Command role permissions
@@ -2031,24 +2740,9 @@ client.on(
       }
 
       try {
-        const focused =
-          interaction.options.getFocused(
-            true
-          );
-
-        if (
-          interaction.commandName ===
-            "attendance" &&
-          focused.name === "day"
-        ) {
-          await handleAttendanceDayAutocomplete(
-            interaction
-          );
-        } else {
-          await handleCompanyAutocomplete(
-            interaction
-          );
-        }
+        await handleCompanyAutocomplete(
+          interaction
+        );
       } catch (error) {
         console.error(
           "Autocomplete failed:"
@@ -2063,6 +2757,52 @@ client.on(
       }
 
       return;
+    }
+
+    if (
+      interaction.isUserSelectMenu() ||
+      interaction.isStringSelectMenu() ||
+      interaction.isButton()
+    ) {
+      try {
+        const handled =
+          await handleAttendanceComponent(
+            interaction
+          );
+
+        if (handled) {
+          return;
+        }
+      } catch (error) {
+        console.error(
+          "Attendance component failed:"
+        );
+        console.error(error);
+
+        try {
+          if (
+            interaction.deferred ||
+            interaction.replied
+          ) {
+            await interaction.editReply({
+              content:
+                "The attendance session encountered an error.",
+              components: []
+            });
+          } else {
+            await interaction.reply({
+              content:
+                "The attendance session encountered an error.",
+              flags:
+                MessageFlags.Ephemeral
+            });
+          }
+        } catch {
+          // Ignore response failures for expired component interactions.
+        }
+
+        return;
+      }
     }
 
     if (!interaction.isChatInputCommand()) {
@@ -2094,14 +2834,9 @@ client.on(
     if (interaction.commandName === "attendance") {
       try {
         await interaction.deferReply({
-          flags: MessageFlags.Ephemeral
+          flags:
+            MessageFlags.Ephemeral
         });
-
-        const discordMember =
-          interaction.options.getUser(
-            "discord_member",
-            true
-          );
 
         const regimentValue =
           interaction.options
@@ -2115,22 +2850,6 @@ client.on(
           interaction.options
             .getString(
               "company",
-              true
-            )
-            .trim();
-
-        const day =
-          interaction.options
-            .getString(
-              "day",
-              true
-            )
-            .trim();
-
-        const attendance =
-          interaction.options
-            .getString(
-              "attendance",
               true
             )
             .trim();
@@ -2185,199 +2904,65 @@ client.on(
           return;
         }
 
-        if (
-          !ATTENDANCE_STATUS_CHOICES
-            .some(
-              value =>
-                normalizeText(value) ===
-                normalizeText(attendance)
-            )
-        ) {
-          await interaction.editReply(
-            "That attendance status is not configured."
-          );
-          return;
-        }
-
-        let attendanceColumn;
-
-        try {
-          attendanceColumn =
-            getAttendanceColumn(
-              matchedCompany,
-              day
-            );
-        } catch (attendanceError) {
-          if (
-            attendanceError?.message ===
-            "SECOND_KRUMPER_WEEKEND_ONLY"
-          ) {
-            await interaction.editReply(
-              [
-                "2. Krümper-Kompanie only records attendance on Saturday and Sunday.",
-                "",
-                "**Saturday:** Column H",
-                "**Sunday:** Column I"
-              ].join("\n")
-            );
-            return;
-          }
-
-          if (
-            attendanceError?.message ===
-            "ATTENDANCE_NOT_ALLOWED_FOR_COMPANY"
-          ) {
-            await interaction.editReply(
-              "Attendance cannot be recorded for that company."
-            );
-            return;
-          }
-
-          await interaction.editReply(
-            "The selected attendance day is invalid."
-          );
-          return;
-        }
-
-        const existingMember =
-          await findMemberByDiscordId(
-            discordMember.id
+        const token =
+          createAttendanceSessionToken(
+            interaction
           );
 
-        if (!existingMember) {
-          await interaction.editReply(
-            [
-              "That Discord member was not found in the Grand ORBAT.",
-              "",
-              `**Discord Member:** ${discordMember}`,
-              `**Discord ID:** ${discordMember.id}`,
-              "",
-              "No attendance was changed."
-            ].join("\n")
-          );
-          return;
-        }
+        const session = {
+          token,
+          ownerId:
+            interaction.user.id,
+          guildId:
+            interaction.guildId,
+          spreadsheetId:
+            regiment.spreadsheetId,
+          regimentKey:
+            regiment.key,
+          regimentDisplayName:
+            regiment.displayName,
+          company:
+            matchedCompany,
+          day: null,
+          userIds:
+            new Set(),
+          expiresAt:
+            Date.now() +
+            ATTENDANCE_SESSION_TTL_MS
+        };
 
-        const sameRegiment =
-          existingMember.regiment
-            .spreadsheetId ===
-          regiment.spreadsheetId;
+        attendanceSessions.set(
+          token,
+          session
+        );
 
-        const sameCompany =
-          normalizeText(
-            existingMember.companyName
-          ) ===
-          normalizeText(
-            matchedCompany
-          );
+        scheduleAttendanceSessionExpiry(
+          token
+        );
 
-        if (
-          !sameRegiment ||
-          !sameCompany
-        ) {
-          await interaction.editReply(
-            [
-              "That member is not assigned to the selected regiment/company.",
-              "",
-              `**Selected Regiment:** ${regiment.displayName}`,
-              `**Selected Company:** ${matchedCompany}`,
-              "",
-              `**Actual Regiment:** ${existingMember.regiment.displayName}`,
-              `**Actual Company:** ${existingMember.companyName}`,
-              `**Actual Row:** ${existingMember.row}`,
-              "",
-              "No attendance was changed."
-            ].join("\n")
-          );
-          return;
-        }
-
-        const memberRecord =
-          await getMemberRecord({
-            spreadsheetId:
-              regiment.spreadsheetId,
-            sheetName:
-              matchedCompany,
-            row:
-              existingMember.row
-          });
-
-        const attendanceResult =
-          await setAttendanceMarker({
-            spreadsheetId:
-              regiment.spreadsheetId,
-            sheetName:
-              matchedCompany,
-            row:
-              existingMember.row,
-            day,
-            attendance
-          });
-
-        await sendOrbatLog({
-          interaction,
-          category: "Attendance",
-          action: "Attendance Updated",
-          affectedMember:
-            discordMember,
-          robloxUsername:
-            memberRecord.robloxUsername,
-          changes: [
-            {
-              label: "Regiment",
-              after:
-                regiment.displayName
-            },
-            {
-              label: "Company",
-              after:
-                matchedCompany
-            },
-            {
-              label: "Day",
-              after:
-                day
-            },
-            {
-              label: "Attendance",
-              before:
-                attendanceResult.previousValue ||
-                "Blank",
-              after:
-                attendance
-            },
-            {
-              label: "Cell",
-              after:
-                attendanceResult.range
-            }
-          ]
-        });
-
-        await interaction.editReply(
-          [
-            "Attendance updated successfully.",
+        await interaction.editReply({
+          content: [
+            ...attendanceSessionHeader(
+              session
+            ),
             "",
-            `**Discord Member:** ${discordMember}`,
-            `**Roblox Username:** ${memberRecord.robloxUsername || "Not set"}`,
-            `**Regiment:** ${regiment.displayName}`,
-            `**Company:** ${matchedCompany}`,
-            `**Day:** ${day}`,
-            `**Attendance:** ${attendance}`,
-            `**Spreadsheet Cell:** ${attendanceResult.range}`,
-            "",
+            "First choose the attendance day.",
             isSecondKrumperCompany(
               matchedCompany
             )
-              ? "2. Krümper-Kompanie uses H for Saturday and I for Sunday."
-              : `${day} uses column ${attendanceColumn}.`
-          ].join("\n")
-        );
+              ? "2. Krümper-Kompanie only allows Saturday or Sunday."
+              : "Normal companies allow Monday through Sunday."
+          ].join("\n"),
+          components:
+            buildAttendanceDayComponents(
+              session
+            )
+        });
 
         return;
       } catch (error) {
         console.error(
-          "Failed to update attendance:"
+          "Failed to start attendance session:"
         );
         console.error(error);
 
@@ -2390,13 +2975,15 @@ client.on(
             interaction.deferred ||
             interaction.replied
           ) {
-            await interaction.editReply(
-              `Attendance could not be updated: ${errorMessage}`
-            );
+            await interaction.editReply({
+              content:
+                `Attendance could not be started: ${errorMessage}`,
+              components: []
+            });
           } else {
             await interaction.reply({
               content:
-                `Attendance could not be updated: ${errorMessage}`,
+                `Attendance could not be started: ${errorMessage}`,
               flags:
                 MessageFlags.Ephemeral
             });
