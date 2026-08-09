@@ -242,6 +242,70 @@ const commands = [
     .toJSON(),
 
   new SlashCommandBuilder()
+    .setName("memberinfo")
+    .setDescription("Shows a member's Grand ORBAT information and attendance.")
+    .addUserOption(option =>
+      option
+        .setName("discord_member")
+        .setDescription("Select the Discord member.")
+        .setRequired(true)
+    )
+    .toJSON(),
+
+  new SlashCommandBuilder()
+    .setName("companyinfo")
+    .setDescription("Shows strength and rank information for a company.")
+    .addStringOption(option =>
+      option
+        .setName("regiment")
+        .setDescription("Select the regiment.")
+        .setRequired(true)
+        .addChoices(...REGIMENT_CHOICES)
+    )
+    .addStringOption(option =>
+      option
+        .setName("company")
+        .setDescription("Select the company.")
+        .setRequired(true)
+        .setAutocomplete(true)
+    )
+    .toJSON(),
+
+  new SlashCommandBuilder()
+    .setName("missingattendance")
+    .setDescription("Shows members missing attendance for a selected day.")
+    .addStringOption(option =>
+      option
+        .setName("regiment")
+        .setDescription("Select the regiment.")
+        .setRequired(true)
+        .addChoices(...REGIMENT_CHOICES)
+    )
+    .addStringOption(option =>
+      option
+        .setName("company")
+        .setDescription("Select the company.")
+        .setRequired(true)
+        .setAutocomplete(true)
+    )
+    .addStringOption(option =>
+      option
+        .setName("day")
+        .setDescription("Select the attendance day.")
+        .setRequired(true)
+        .addChoices(
+          { name: "Monday", value: "Monday" },
+          { name: "Tuesday", value: "Tuesday" },
+          { name: "Wednesday", value: "Wednesday" },
+          { name: "Thursday", value: "Thursday" },
+          { name: "Friday", value: "Friday" },
+          { name: "Saturday", value: "Saturday" },
+          { name: "Sunday", value: "Sunday" }
+        )
+    )
+    .toJSON(),
+
+  new SlashCommandBuilder()
     .setName("orginize")
     .setDescription(
       "Organizes a company roster from highest rank to lowest rank."
@@ -299,7 +363,7 @@ const rest = new REST({
 async function deployCommands() {
   try {
     console.log(
-      "Registering /addmember, /transfer, /rank, /removemember, /attendance, and /orginize..."
+      "Registering ORBAT commands including /memberinfo, /companyinfo, /missingattendance, and /orginize..."
     );
 
     await rest.put(

@@ -682,6 +682,125 @@ function getAttendanceColumn(sheetName, day) {
   return column;
 }
 
+
+async function getMemberAttendanceSummary({
+  spreadsheetId,
+  sheetName,
+  row
+}) {
+  const safeSheetName = escapeSheetName(sheetName);
+
+  if (isFirstKrumperCompany(sheetName)) {
+    const response = await sheets.spreadsheets.values.get({
+      spreadsheetId,
+      range: `${safeSheetName}!H${row}`
+    });
+    const entryDate = String(response.data.values?.[0]?.[0] || "").trim();
+    return { lines: [`**Entry Date:** ${entryDate || "Blank"}`] };
+  }
+
+  if (isAttendanceExcludedCompany(sheetName)) {
+    return { lines: ["**Attendance:** Not tracked for this company."] };
+  }
+
+  if (isSecondKrumperCompany(sheetName)) {
+    const response = await sheets.spreadsheets.values.get({
+      spreadsheetId,
+      range: `${safeSheetName}!H${row}:I${row}`
+    });
+    const values = response.data.values?.[0] || [];
+    return {
+      lines: [
+        `**Saturday:** ${String(values[0] || "").trim() || "Blank"}`,
+        `**Sunday:** ${String(values[1] || "").trim() || "Blank"}`
+      ]
+    };
+  }
+
+  const response = await sheets.spreadsheets.values.get({
+    spreadsheetId,
+    range: `${safeSheetName}!H${row}:N${row}`
+  });
+  const values = response.data.values?.[0] || [];
+  return {
+    lines: ATTENDANCE_DAYS.map(
+      (day, i) => `**${day}:** ${String(values[i] || "").trim() || "Blank"}`
+    )
+  };
+}
+
+async function getCompanyRosterSummary({
+  spreadsheetId,
+  sheetName
+}) {
+  const safeSheetName = escapeSheetName(sheetName);
+  const lastMemberRow = getLastMemberRow(sheetName);
+
+  const response = await sheets.spreadsheets.values.get({
+    spreadsheetId,
+    range: `${safeSheetName}!C${FIRST_MEMBER_ROW}:E${lastMemberRow}`,
+    majorDimension: "ROWS"
+  });
+
+  const members = (response.data.values || [])
+    .map((row, index) => ({
+      robloxUsername: String(row?.[0] || "").trim(),
+      discordId: String(row?.[1] || "").trim(),
+      rank: String(row?.[2] || "").trim(),
+      row: FIRST_MEMBER_ROW + index
+    }))
+    .filter(m => m.robloxUsername || m.discordId || m.rank);
+
+  const rankCounts = new Map();
+  for (const member of members) {
+    const rank = member.rank || "Unknown";
+    rankCounts.set(rank, (rankCounts.get(rank) || 0) + 1);
+  }
+
+  const rankBreakdown = [...rankCounts.entries()].sort((a, b) => {
+    const rankA = RANK_SORT_PRIORITY.get(normalizeText(a[0])) ?? 999;
+    const rankB = RANK_SORT_PRIORITY.get(normalizeText(b[0])) ?? 999;
+    return rankA !== rankB
+      ? rankA - rankB
+      : a[0].localeCompare(b[0], undefined, { sensitivity: "base" });
+  });
+
+  return { members, rankBreakdown };
+}
+
+async function getMissingAttendanceMembers({
+  spreadsheetId,
+  sheetName,
+  day
+}) {
+  const attendanceColumn = getAttendanceColumn(sheetName, day);
+  const safeSheetName = escapeSheetName(sheetName);
+  const lastMemberRow = getLastMemberRow(sheetName);
+  const lastColumn = isSecondKrumperCompany(sheetName) ? "I" : "N";
+
+  const response = await sheets.spreadsheets.values.get({
+    spreadsheetId,
+    range: `${safeSheetName}!C${FIRST_MEMBER_ROW}:${lastColumn}${lastMemberRow}`,
+    majorDimension: "ROWS"
+  });
+
+  const attendanceIndex =
+    columnLetterToNumber(attendanceColumn) - columnLetterToNumber("C");
+
+  return (response.data.values || [])
+    .map((row, index) => ({
+      robloxUsername: String(row?.[0] || "").trim(),
+      discordId: String(row?.[1] || "").trim(),
+      rank: String(row?.[2] || "").trim(),
+      attendance: String(row?.[attendanceIndex] || "").trim(),
+      row: FIRST_MEMBER_ROW + index
+    }))
+    .filter(m =>
+      (m.robloxUsername || m.discordId || m.rank) &&
+      !m.attendance
+    );
+}
+
 async function setAttendanceMarker({
   spreadsheetId,
   sheetName,
@@ -2791,7 +2910,11 @@ client.on(
         interaction.commandName ===
           "attendance" ||
         interaction.commandName ===
-          "orginize";
+          "orginize" ||
+        interaction.commandName ===
+          "companyinfo" ||
+        interaction.commandName ===
+          "missingattendance";
 
       if (!isCompanyAutocompleteCommand) {
         return;
@@ -2873,7 +2996,10 @@ client.on(
       interaction.commandName !== "rank" &&
       interaction.commandName !== "transfer" &&
       interaction.commandName !== "attendance" &&
-      interaction.commandName !== "orginize"
+      interaction.commandName !== "orginize" &&
+      interaction.commandName !== "memberinfo" &&
+      interaction.commandName !== "companyinfo" &&
+      interaction.commandName !== "missingattendance"
     ) {
       return;
     }
@@ -2888,6 +3014,212 @@ client.on(
         flags: MessageFlags.Ephemeral
       });
       return;
+    }
+
+
+    if (interaction.commandName === "memberinfo") {
+      try {
+        await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+
+        const discordMember =
+          interaction.options.getUser("discord_member", true);
+
+        const existingMember =
+          await findMemberByDiscordId(discordMember.id);
+
+        if (!existingMember) {
+          await interaction.editReply(
+            [
+              "That member was not found in the Grand ORBAT.",
+              "",
+              `**Discord Member:** ${discordMember}`,
+              `**Discord ID:** ${discordMember.id}`
+            ].join("\n")
+          );
+          return;
+        }
+
+        const memberRecord = await getMemberRecord({
+          spreadsheetId: existingMember.regiment.spreadsheetId,
+          sheetName: existingMember.companyName,
+          row: existingMember.row
+        });
+
+        const attendanceSummary = await getMemberAttendanceSummary({
+          spreadsheetId: existingMember.regiment.spreadsheetId,
+          sheetName: existingMember.companyName,
+          row: existingMember.row
+        });
+
+        await interaction.editReply(
+          [
+            "**Grand ORBAT Member Information**",
+            "",
+            `**Discord Member:** ${discordMember}`,
+            `**Roblox Username:** ${memberRecord.robloxUsername || "Not set"}`,
+            `**Regiment:** ${existingMember.regiment.displayName}`,
+            `**Kompanie:** ${existingMember.companyName}`,
+            `**Rank:** ${memberRecord.rank || "Not set"}`,
+            `**Timezone:** ${memberRecord.timezone || "Not set"}`,
+            `**Sheet Row:** ${existingMember.row}`,
+            "",
+            "**Current Attendance**",
+            ...attendanceSummary.lines
+          ].join("\n")
+        );
+        return;
+      } catch (error) {
+        console.error("Failed to retrieve member information:", error);
+        await interaction.editReply(
+          `Member information could not be retrieved: ${error?.message || "Unknown error."}`
+        );
+        return;
+      }
+    }
+
+    if (interaction.commandName === "companyinfo") {
+      try {
+        await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+
+        const regimentValue =
+          interaction.options.getString("regiment", true).trim();
+        const company =
+          interaction.options.getString("company", true).trim();
+
+        const regiment = resolveRegiment(regimentValue);
+        const availableCompanies = await getCompanySheetNames(regiment);
+        const matchedCompany = availableCompanies.find(
+          name => normalizeText(name) === normalizeText(company)
+        );
+
+        if (!matchedCompany) {
+          await interaction.editReply("The selected company could not be found.");
+          return;
+        }
+
+        const summary = await getCompanyRosterSummary({
+          spreadsheetId: regiment.spreadsheetId,
+          sheetName: matchedCompany
+        });
+
+        const maxSlots =
+          getLastMemberRow(matchedCompany) - FIRST_MEMBER_ROW + 1;
+
+        const rankLines =
+          summary.rankBreakdown.length
+            ? summary.rankBreakdown.map(([rank, count]) => `• **${rank}:** ${count}`)
+            : ["• No members found."];
+
+        await interaction.editReply(
+          [
+            "**Kompanie Information**",
+            "",
+            `**Regiment:** ${regiment.displayName}`,
+            `**Kompanie:** ${matchedCompany}`,
+            `**Current Strength:** ${summary.members.length}`,
+            `**Roster Capacity:** ${maxSlots}`,
+            `**Open Slots:** ${Math.max(0, maxSlots - summary.members.length)}`,
+            "",
+            "**Rank Breakdown**",
+            ...rankLines
+          ].join("\n")
+        );
+        return;
+      } catch (error) {
+        console.error("Failed to retrieve company information:", error);
+        await interaction.editReply(
+          `Company information could not be retrieved: ${error?.message || "Unknown error."}`
+        );
+        return;
+      }
+    }
+
+    if (interaction.commandName === "missingattendance") {
+      try {
+        await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+
+        const regimentValue =
+          interaction.options.getString("regiment", true).trim();
+        const company =
+          interaction.options.getString("company", true).trim();
+        const day =
+          interaction.options.getString("day", true).trim();
+
+        const regiment = resolveRegiment(regimentValue);
+        const availableCompanies = await getCompanySheetNames(regiment);
+        const matchedCompany = availableCompanies.find(
+          name => normalizeText(name) === normalizeText(company)
+        );
+
+        if (!matchedCompany) {
+          await interaction.editReply("The selected company could not be found.");
+          return;
+        }
+
+        if (isAttendanceExcludedCompany(matchedCompany)) {
+          await interaction.editReply(
+            "Attendance is not tracked for that company."
+          );
+          return;
+        }
+
+        try {
+          getAttendanceColumn(matchedCompany, day);
+        } catch (attendanceError) {
+          if (attendanceError?.message === "SECOND_KRUMPER_WEEKEND_ONLY") {
+            await interaction.editReply(
+              "2. Krümper-Kompanie only tracks Saturday and Sunday attendance."
+            );
+            return;
+          }
+          throw attendanceError;
+        }
+
+        const missingMembers = await getMissingAttendanceMembers({
+          spreadsheetId: regiment.spreadsheetId,
+          sheetName: matchedCompany,
+          day
+        });
+
+        const memberLines = missingMembers.slice(0, 30).map(member => {
+          const identity = member.discordId
+            ? `<@${member.discordId}>`
+            : member.robloxUsername || "Unknown member";
+          return `• ${identity}${member.rank ? ` — ${member.rank}` : ""} — Row ${member.row}`;
+        });
+
+        const lines = [
+          "**Missing Attendance**",
+          "",
+          `**Regiment:** ${regiment.displayName}`,
+          `**Kompanie:** ${matchedCompany}`,
+          `**Day:** ${day}`,
+          `**Missing:** ${missingMembers.length}`,
+          ""
+        ];
+
+        if (!missingMembers.length) {
+          lines.push(
+            "Everyone on the roster has an attendance marker for that day."
+          );
+        } else {
+          lines.push("**Members Without Attendance:**", ...memberLines);
+          if (missingMembers.length > memberLines.length) {
+            lines.push(
+              `• …and ${missingMembers.length - memberLines.length} more`
+            );
+          }
+        }
+
+        await interaction.editReply(lines.join("\n"));
+        return;
+      } catch (error) {
+        console.error("Failed to retrieve missing attendance:", error);
+        await interaction.editReply(
+          `Missing attendance could not be retrieved: ${error?.message || "Unknown error."}`
+        );
+        return;
+      }
     }
 
     if (interaction.commandName === "orginize") {
