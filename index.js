@@ -4912,6 +4912,9 @@ client.on(
         let destinationPosition =
           null;
 
+        let positionWarning =
+          null;
+
         if (
           isSchuetzenRegiment(
             newRegiment
@@ -4940,6 +4943,9 @@ client.on(
             );
             return;
           }
+        } else if (newPositionValue) {
+          positionWarning =
+            `⚠️ Position ignored: ${newRegiment.displayName} does not use the Schützen platoon/position system.`;
         }
 
         const sameRegiment =
@@ -5358,6 +5364,13 @@ client.on(
           "",
           "The original ORBAT entry was cleared after the destination entry was created."
         ];
+
+        if (positionWarning) {
+          replyLines.push(
+            "",
+            positionWarning
+          );
+        }
 
         if (updatedNickname) {
           replyLines.push(
