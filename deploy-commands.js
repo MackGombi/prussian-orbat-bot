@@ -62,7 +62,11 @@ const REGIMENT_CHOICES = [
   }
 ];
 
-const PLATOON_CHOICES = [
+const SCHUETZEN_POSITION_CHOICES = [
+  {
+    name: "Company Commander",
+    value: "company_commander"
+  },
   {
     name: "1. Platoon",
     value: "1_platoon"
@@ -175,12 +179,12 @@ const commands = [
     )
     .addStringOption(option =>
       option
-        .setName("platoon")
+        .setName("position")
         .setDescription(
-          "Required only for Schlesisches Schützen-Bataillon."
+          "Required for Schützen: Commander, 1. Platoon, or 2. Platoon."
         )
         .setRequired(false)
-        .addChoices(...PLATOON_CHOICES)
+        .addChoices(...SCHUETZEN_POSITION_CHOICES)
     )
     .toJSON(),
 
@@ -226,12 +230,12 @@ const commands = [
     )
     .addStringOption(option =>
       option
-        .setName("new_platoon")
+        .setName("new_position")
         .setDescription(
-          "Required only when transferring to Schlesisches Schützen-Bataillon."
+          "Required when transferring to Schützen."
         )
         .setRequired(false)
-        .addChoices(...PLATOON_CHOICES)
+        .addChoices(...SCHUETZEN_POSITION_CHOICES)
     )
     .toJSON(),
 

@@ -84,17 +84,32 @@ const STANDARD_LAST_MEMBER_ROW = 20;
 const GARNISON_LAST_MEMBER_ROW = 36;
 const GARNISON_SHEET_NAME = "Garnison Kompanie";
 
-const SCHUETZEN_PLATOONS = {
+const SCHUETZEN_POSITIONS = {
+  "company_commander": {
+    displayName: "Company Commander",
+    type: "command",
+    firstRow: 6,
+    lastRow: 6
+  },
   "1_platoon": {
     displayName: "1. Platoon",
+    type: "platoon",
     firstRow: 7,
     lastRow: 15
   },
   "2_platoon": {
     displayName: "2. Platoon",
+    type: "platoon",
     firstRow: 17,
     lastRow: 26
   }
+};
+
+const SCHUETZEN_PLATOONS = {
+  "1_platoon":
+    SCHUETZEN_POSITIONS["1_platoon"],
+  "2_platoon":
+    SCHUETZEN_POSITIONS["2_platoon"]
 };
 
 const TWO_ROW_COMMAND_SHEETS = new Set([
@@ -499,15 +514,15 @@ function isSchuetzenRegiment(
   );
 }
 
-function resolveSchuetzenPlatoon(
-  platoonValue
+function resolveSchuetzenPosition(
+  positionValue
 ) {
   const normalized =
-    normalizeText(platoonValue);
+    normalizeText(positionValue);
 
   const entries =
     Object.entries(
-      SCHUETZEN_PLATOONS
+      SCHUETZEN_POSITIONS
     );
 
   for (
@@ -516,7 +531,7 @@ function resolveSchuetzenPlatoon(
     const aliases = [
       key,
       config.displayName,
-      key.replace("_", " "),
+      key.replace(/_/g, " "),
       config.displayName.replace(".", "")
     ];
 
@@ -535,17 +550,34 @@ function resolveSchuetzenPlatoon(
   }
 
   throw new Error(
-    "INVALID_SCHUETZEN_PLATOON"
+    "INVALID_SCHUETZEN_POSITION"
   );
 }
 
-function getSchuetzenPlatoonForRow(
+function resolveSchuetzenPlatoon(
+  platoonValue
+) {
+  const position =
+    resolveSchuetzenPosition(
+      platoonValue
+    );
+
+  if (position.type !== "platoon") {
+    throw new Error(
+      "INVALID_SCHUETZEN_PLATOON"
+    );
+  }
+
+  return position;
+}
+
+function getSchuetzenPositionForRow(
   row
 ) {
   for (
     const [key, config] of
     Object.entries(
-      SCHUETZEN_PLATOONS
+      SCHUETZEN_POSITIONS
     )
   ) {
     if (
@@ -560,6 +592,19 @@ function getSchuetzenPlatoonForRow(
   }
 
   return null;
+}
+
+function getSchuetzenPlatoonForRow(
+  row
+) {
+  const position =
+    getSchuetzenPositionForRow(
+      row
+    );
+
+  return position?.type === "platoon"
+    ? position
+    : null;
 }
 
 function getLastMemberRowForSpreadsheet(
@@ -2104,6 +2149,7 @@ async function addMemberToSheet({
   discordId,
   rank,
   timezone,
+  position = null,
   platoon = null
 }) {
   const schuetzen =
@@ -2124,28 +2170,66 @@ async function addMemberToSheet({
   let row;
 
   if (schuetzen) {
-    if (!platoon) {
+    const requestedPosition =
+      position || platoon;
+
+    if (!requestedPosition) {
       throw new Error(
-        "SCHUETZEN_PLATOON_REQUIRED"
+        "SCHUETZEN_POSITION_REQUIRED"
       );
     }
 
-    const platoonConfig =
-      typeof platoon === "string"
-        ? resolveSchuetzenPlatoon(
-            platoon
+    const positionConfig =
+      typeof requestedPosition === "string"
+        ? resolveSchuetzenPosition(
+            requestedPosition
           )
-        : platoon;
+        : requestedPosition;
 
-    row =
-      await findFirstEmptyRowInRange({
-        spreadsheetId,
-        sheetName,
-        firstRow:
-          platoonConfig.firstRow,
-        lastRow:
-          platoonConfig.lastRow
-      });
+    if (
+      positionConfig.key ===
+      "company_commander"
+    ) {
+      const safeSheetName =
+        escapeSheetName(sheetName);
+
+      const commanderResponse =
+        await sheets.spreadsheets.values.get({
+          spreadsheetId,
+          range:
+            `${safeSheetName}!C6:D6`
+        });
+
+      const commanderRow =
+        commanderResponse.data.values?.[0] ||
+        [];
+
+      const commanderOccupied =
+        String(
+          commanderRow[0] || ""
+        ).trim() ||
+        String(
+          commanderRow[1] || ""
+        ).trim();
+
+      if (commanderOccupied) {
+        throw new Error(
+          "SCHUETZEN_COMMANDER_OCCUPIED"
+        );
+      }
+
+      row = 6;
+    } else {
+      row =
+        await findFirstEmptyRowInRange({
+          spreadsheetId,
+          sheetName,
+          firstRow:
+            positionConfig.firstRow,
+          lastRow:
+            positionConfig.lastRow
+        });
+    }
   } else {
     row =
       await findFirstEmptyRow({
@@ -4793,10 +4877,10 @@ client.on(
             )
             ?.trim() || null;
 
-        const newPlatoonValue =
+        const newPositionValue =
           interaction.options
             .getString(
-              "new_platoon",
+              "new_position",
               false
             )
             ?.trim() || null;
@@ -4825,7 +4909,7 @@ client.on(
             newRegimentValue
           );
 
-        let destinationPlatoon =
+        let destinationPosition =
           null;
 
         if (
@@ -4833,26 +4917,26 @@ client.on(
             newRegiment
           )
         ) {
-          if (!newPlatoonValue) {
+          if (!newPositionValue) {
             await interaction.editReply(
               [
                 "The transfer was not made.",
                 "",
-                "**Schlesisches Schützen-Bataillon uses a platoon system.**",
-                "Choose **1. Platoon** or **2. Platoon** in the `new_platoon` option and try again."
+                "**Schlesisches Schützen-Bataillon uses a position system.**",
+                "Choose **Company Commander**, **1. Platoon**, or **2. Platoon** in the `new_position` option and try again."
               ].join("\n")
             );
             return;
           }
 
           try {
-            destinationPlatoon =
-              resolveSchuetzenPlatoon(
-                newPlatoonValue
+            destinationPosition =
+              resolveSchuetzenPosition(
+                newPositionValue
               );
           } catch {
             await interaction.editReply(
-              "That destination platoon is not configured."
+              "That destination Schützen position is not configured."
             );
             return;
           }
@@ -4862,11 +4946,11 @@ client.on(
           existingMember.regiment.spreadsheetId ===
           newRegiment.spreadsheetId;
 
-        const currentPlatoon =
+        const currentPosition =
           isSchuetzenRegiment(
             existingMember.regiment
           )
-            ? getSchuetzenPlatoonForRow(
+            ? getSchuetzenPositionForRow(
                 existingMember.row
               )
             : null;
@@ -4879,8 +4963,8 @@ client.on(
             !isSchuetzenRegiment(
               newRegiment
             ) ||
-            currentPlatoon?.key ===
-              destinationPlatoon?.key
+            currentPosition?.key ===
+              destinationPosition?.key
           );
 
         const availableCompanies =
@@ -5010,7 +5094,10 @@ client.on(
             sheetName:
               existingMember.companyName,
             platoon:
-              currentPlatoon
+              currentPosition?.type ===
+              "platoon"
+                ? currentPosition
+                : null
           });
 
           existingMember.row =
@@ -5136,8 +5223,8 @@ client.on(
               finalRank,
             timezone:
               memberRecord.timezone,
-            platoon:
-              destinationPlatoon
+            position:
+              destinationPosition
           });
 
         try {
@@ -5208,7 +5295,10 @@ client.on(
           sheetName:
             matchedCompany,
           platoon:
-            destinationPlatoon
+            destinationPosition?.type ===
+            "platoon"
+              ? destinationPosition
+              : null
         });
 
         destinationRow =
@@ -6419,10 +6509,10 @@ client.on(
         .getString("timezone", true)
         .trim();
 
-      const platoonValue =
+      const positionValue =
         interaction.options
           .getString(
-            "platoon",
+            "position",
             false
           )
           ?.trim() || null;
@@ -6443,33 +6533,34 @@ client.on(
 
       const regiment = resolveRegiment(regimentValue);
 
-      let schuetzenPlatoon = null;
+      let schuetzenPosition =
+        null;
 
       if (
         isSchuetzenRegiment(
           regiment
         )
       ) {
-        if (!platoonValue) {
+        if (!positionValue) {
           await interaction.editReply(
             [
               "The member was not added.",
               "",
-              "**Schlesisches Schützen-Bataillon uses a platoon system.**",
-              "Select either **1. Platoon** or **2. Platoon** in the `platoon` option and try again."
+              "**Schlesisches Schützen-Bataillon uses a position system.**",
+              "Select **Company Commander**, **1. Platoon**, or **2. Platoon** in the `position` option and try again."
             ].join("\n")
           );
           return;
         }
 
         try {
-          schuetzenPlatoon =
-            resolveSchuetzenPlatoon(
-              platoonValue
+          schuetzenPosition =
+            resolveSchuetzenPosition(
+              positionValue
             );
         } catch {
           await interaction.editReply(
-            "That platoon is not configured. Select 1. Platoon or 2. Platoon."
+            "That Schützen position is not configured."
           );
           return;
         }
@@ -6598,8 +6689,8 @@ client.on(
         discordId: discordMember.id,
         rank,
         timezone,
-        platoon:
-          schuetzenPlatoon
+        position:
+          schuetzenPosition
       });
 
       let timezoneResult = null;
@@ -6630,7 +6721,10 @@ client.on(
         sheetName:
           matchedCompany,
         platoon:
-          schuetzenPlatoon
+          schuetzenPosition?.type ===
+          "platoon"
+            ? schuetzenPosition
+            : null
       });
 
       row =
