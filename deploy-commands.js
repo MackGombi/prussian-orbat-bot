@@ -55,6 +55,21 @@ const REGIMENT_CHOICES = [
   {
     name: "Ostpreußisches Jäger-Bataillon",
     value: "ostpreussisches_jaeger"
+  },
+  {
+    name: "Schlesisches Schützen-Bataillon",
+    value: "schlesisches_schuetzen"
+  }
+];
+
+const PLATOON_CHOICES = [
+  {
+    name: "1. Platoon",
+    value: "1_platoon"
+  },
+  {
+    name: "2. Platoon",
+    value: "2_platoon"
   }
 ];
 
@@ -158,6 +173,15 @@ const commands = [
         .setMinLength(1)
         .setMaxLength(100)
     )
+    .addStringOption(option =>
+      option
+        .setName("platoon")
+        .setDescription(
+          "Required only for Schlesisches Schützen-Bataillon."
+        )
+        .setRequired(false)
+        .addChoices(...PLATOON_CHOICES)
+    )
     .toJSON(),
 
   new SlashCommandBuilder()
@@ -199,6 +223,15 @@ const commands = [
         )
         .setRequired(false)
         .addChoices(...RANK_CHOICES)
+    )
+    .addStringOption(option =>
+      option
+        .setName("new_platoon")
+        .setDescription(
+          "Required only when transferring to Schlesisches Schützen-Bataillon."
+        )
+        .setRequired(false)
+        .addChoices(...PLATOON_CHOICES)
     )
     .toJSON(),
 

@@ -66,6 +66,11 @@ const JAEGER_SPREADSHEET_ID = cleanEnvironmentValue(
   process.env.JAEGER_SPREADSHEET_ID
 );
 
+const SCHUETZEN_SPREADSHEET_ID =
+  cleanEnvironmentValue(
+    process.env.SCHUETZEN_SPREADSHEET_ID
+  ) || "1Q5j3gYqwboiL-kHvAVnGvKI-csDuLsxZ4MjHCL9THEo";
+
 const SERVICE_ACCOUNT_FILE = "./service-account.json";
 
 const GOOGLE_SERVICE_ACCOUNT_BASE64 =
@@ -78,6 +83,19 @@ const COMMAND_LAST_MEMBER_ROW = 7;
 const STANDARD_LAST_MEMBER_ROW = 20;
 const GARNISON_LAST_MEMBER_ROW = 36;
 const GARNISON_SHEET_NAME = "Garnison Kompanie";
+
+const SCHUETZEN_PLATOONS = {
+  "1_platoon": {
+    displayName: "1. Platoon",
+    firstRow: 7,
+    lastRow: 15
+  },
+  "2_platoon": {
+    displayName: "2. Platoon",
+    firstRow: 17,
+    lastRow: 26
+  }
+};
 
 const TWO_ROW_COMMAND_SHEETS = new Set([
   "Ostpreussisches Jäger-Bataillon Command",
@@ -148,6 +166,21 @@ const REGIMENTS = [
       "ostpreussisches jaeger",
       "ostpreußisches jäger"
     ]
+  },
+  {
+    key: "schuetzen",
+    displayName: "Schlesisches Schützen-Bataillon",
+    nicknamePrefix: "Sch",
+    spreadsheetId: SCHUETZEN_SPREADSHEET_ID,
+    aliases: [
+      "schlesisches_schuetzen",
+      "schuetzen",
+      "schützen",
+      "schlesisches schützen-bataillon",
+      "schlesisches schuetzen-bataillon",
+      "schlesisches schützen",
+      "schlesisches schuetzen"
+    ]
   }
 ];
 
@@ -170,7 +203,8 @@ const requiredEnvironmentValues = [
     "WESTPREUSSISCHES_SPREADSHEET_ID",
     WESTPREUSSISCHES_SPREADSHEET_ID
   ],
-  ["JAEGER_SPREADSHEET_ID", JAEGER_SPREADSHEET_ID]
+  ["JAEGER_SPREADSHEET_ID", JAEGER_SPREADSHEET_ID],
+  ["SCHUETZEN_SPREADSHEET_ID", SCHUETZEN_SPREADSHEET_ID]
 ];
 
 for (const [name, value] of requiredEnvironmentValues) {
@@ -448,6 +482,101 @@ function resolveRegiment(regimentValue) {
   }
 
   return regiment;
+}
+
+
+function isSchuetzenRegiment(
+  regimentOrSpreadsheetId
+) {
+  const spreadsheetId =
+    typeof regimentOrSpreadsheetId === "string"
+      ? regimentOrSpreadsheetId
+      : regimentOrSpreadsheetId?.spreadsheetId;
+
+  return (
+    String(spreadsheetId || "").trim() ===
+    SCHUETZEN_SPREADSHEET_ID
+  );
+}
+
+function resolveSchuetzenPlatoon(
+  platoonValue
+) {
+  const normalized =
+    normalizeText(platoonValue);
+
+  const entries =
+    Object.entries(
+      SCHUETZEN_PLATOONS
+    );
+
+  for (
+    const [key, config] of entries
+  ) {
+    const aliases = [
+      key,
+      config.displayName,
+      key.replace("_", " "),
+      config.displayName.replace(".", "")
+    ];
+
+    if (
+      aliases.some(
+        alias =>
+          normalizeText(alias) ===
+          normalized
+      )
+    ) {
+      return {
+        key,
+        ...config
+      };
+    }
+  }
+
+  throw new Error(
+    "INVALID_SCHUETZEN_PLATOON"
+  );
+}
+
+function getSchuetzenPlatoonForRow(
+  row
+) {
+  for (
+    const [key, config] of
+    Object.entries(
+      SCHUETZEN_PLATOONS
+    )
+  ) {
+    if (
+      row >= config.firstRow &&
+      row <= config.lastRow
+    ) {
+      return {
+        key,
+        ...config
+      };
+    }
+  }
+
+  return null;
+}
+
+function getLastMemberRowForSpreadsheet(
+  spreadsheetId,
+  sheetName
+) {
+  if (
+    isSchuetzenRegiment(
+      spreadsheetId
+    )
+  ) {
+    return 26;
+  }
+
+  return getLastMemberRow(
+    sheetName
+  );
 }
 
 function escapeSheetName(sheetName) {
@@ -1133,7 +1262,11 @@ async function findMemberRowInCompanyByDiscordId({
   discordId
 }) {
   const safeSheetName = escapeSheetName(sheetName);
-  const lastMemberRow = getLastMemberRow(sheetName);
+  const lastMemberRow =
+    getLastMemberRowForSpreadsheet(
+      spreadsheetId,
+      sheetName
+    );
 
   const response =
     await sheets.spreadsheets.values.get({
@@ -1201,10 +1334,165 @@ function columnLetterToNumber(column) {
   return result;
 }
 
+
+async function sortRowRangeByRank({
+  spreadsheetId,
+  sheetName,
+  firstRow,
+  lastRow
+}) {
+  const safeSheetName =
+    escapeSheetName(sheetName);
+
+  const lastColumn =
+    getSortLastColumn(sheetName);
+
+  const columnCount =
+    columnLetterToNumber(lastColumn) -
+    columnLetterToNumber("C") +
+    1;
+
+  const slotCount =
+    lastRow - firstRow + 1;
+
+  const response =
+    await sheets.spreadsheets.values.get({
+      spreadsheetId,
+      range:
+        `${safeSheetName}!C${firstRow}:` +
+        `${lastColumn}${lastRow}`,
+      majorDimension: "ROWS"
+    });
+
+  const members =
+    (response.data.values || [])
+      .map(row => {
+        const padded =
+          Array.from(
+            { length: columnCount },
+            (_, index) =>
+              row[index] ?? ""
+          );
+
+        return {
+          rowData: padded
+        };
+      })
+      .filter(member =>
+        String(
+          member.rowData[0] || ""
+        ).trim() ||
+        String(
+          member.rowData[1] || ""
+        ).trim()
+      );
+
+  members.sort((a, b) => {
+    const rankA =
+      RANK_SORT_PRIORITY.get(
+        normalizeText(
+          a.rowData[2]
+        )
+      ) ?? 999;
+
+    const rankB =
+      RANK_SORT_PRIORITY.get(
+        normalizeText(
+          b.rowData[2]
+        )
+      ) ?? 999;
+
+    if (rankA !== rankB) {
+      return rankA - rankB;
+    }
+
+    return String(
+      a.rowData[0] || ""
+    ).localeCompare(
+      String(
+        b.rowData[0] || ""
+      ),
+      undefined,
+      {
+        sensitivity: "base"
+      }
+    );
+  });
+
+  const rewrittenRows =
+    Array.from(
+      { length: slotCount },
+      (_, index) =>
+        members[index]?.rowData ||
+        Array(
+          columnCount
+        ).fill("")
+    );
+
+  await sheets.spreadsheets.values.update({
+    spreadsheetId,
+    range:
+      `${safeSheetName}!C${firstRow}:` +
+      `${lastColumn}${lastRow}`,
+    valueInputOption: "USER_ENTERED",
+    requestBody: {
+      values: rewrittenRows
+    }
+  });
+
+  return members.length;
+}
+
 async function sortCompanyByRank({
   spreadsheetId,
-  sheetName
+  sheetName,
+  platoon = null
 }) {
+  if (
+    isSchuetzenRegiment(
+      spreadsheetId
+    )
+  ) {
+    if (platoon) {
+      const platoonConfig =
+        typeof platoon === "string"
+          ? resolveSchuetzenPlatoon(
+              platoon
+            )
+          : platoon;
+
+      return sortRowRangeByRank({
+        spreadsheetId,
+        sheetName,
+        firstRow:
+          platoonConfig.firstRow,
+        lastRow:
+          platoonConfig.lastRow
+      });
+    }
+
+    let total = 0;
+
+    for (
+      const platoonConfig of
+      Object.values(
+        SCHUETZEN_PLATOONS
+      )
+    ) {
+      total +=
+        await sortRowRangeByRank({
+          spreadsheetId,
+          sheetName,
+          firstRow:
+            platoonConfig.firstRow,
+          lastRow:
+            platoonConfig.lastRow
+        });
+    }
+
+    return total;
+  }
+
   const safeSheetName =
     escapeSheetName(sheetName);
 
@@ -1540,6 +1828,51 @@ async function resetDiscordNicknameToRobloxUsername({
 |--------------------------------------------------------------------------
 */
 
+
+async function findFirstEmptyRowInRange({
+  spreadsheetId,
+  sheetName,
+  firstRow,
+  lastRow
+}) {
+  const safeSheetName =
+    escapeSheetName(sheetName);
+
+  const response =
+    await sheets.spreadsheets.values.get({
+      spreadsheetId,
+      range:
+        `${safeSheetName}!C${firstRow}:` +
+        `C${lastRow}`
+    });
+
+  const values =
+    response.data.values || [];
+
+  for (
+    let row = firstRow;
+    row <= lastRow;
+    row += 1
+  ) {
+    const arrayIndex =
+      row - firstRow;
+
+    const value =
+      values[arrayIndex]?.[0];
+
+    if (
+      !value ||
+      String(value).trim() === ""
+    ) {
+      return row;
+    }
+  }
+
+  throw new Error(
+    "PLATOON_FULL"
+  );
+}
+
 async function findFirstEmptyRow({
   spreadsheetId,
   sheetName
@@ -1591,7 +1924,10 @@ async function findMemberByDiscordId(discordId) {
         escapeSheetName(companyName);
 
       const lastMemberRow =
-        getLastMemberRow(companyName);
+        getLastMemberRowForSpreadsheet(
+          regiment.spreadsheetId,
+          companyName
+        );
 
       return (
         `${safeSheetName}!D${FIRST_MEMBER_ROW}:` +
@@ -1767,22 +2103,56 @@ async function addMemberToSheet({
   robloxUsername,
   discordId,
   rank,
-  timezone
+  timezone,
+  platoon = null
 }) {
-  /*
-   * Final hard-lock validation.
-   * A Rekrut may only be written to 1. Krümper-Kompanie, and
-   * 1. Krümper-Kompanie may only contain Rekruten.
-   */
-  assertCompanyRankAllowed(
-    sheetName,
-    rank
-  );
+  const schuetzen =
+    isSchuetzenRegiment(
+      spreadsheetId
+    );
 
-  const row = await findFirstEmptyRow({
-    spreadsheetId,
-    sheetName
-  });
+  if (!schuetzen) {
+    /*
+     * Final hard-lock validation for the normal infantry structure.
+     */
+    assertCompanyRankAllowed(
+      sheetName,
+      rank
+    );
+  }
+
+  let row;
+
+  if (schuetzen) {
+    if (!platoon) {
+      throw new Error(
+        "SCHUETZEN_PLATOON_REQUIRED"
+      );
+    }
+
+    const platoonConfig =
+      typeof platoon === "string"
+        ? resolveSchuetzenPlatoon(
+            platoon
+          )
+        : platoon;
+
+    row =
+      await findFirstEmptyRowInRange({
+        spreadsheetId,
+        sheetName,
+        firstRow:
+          platoonConfig.firstRow,
+        lastRow:
+          platoonConfig.lastRow
+      });
+  } else {
+    row =
+      await findFirstEmptyRow({
+        spreadsheetId,
+        sheetName
+      });
+  }
 
   const safeSheetName = escapeSheetName(sheetName);
 
@@ -1810,7 +2180,10 @@ async function addMemberToSheet({
    * the member data. This guarantees H is populated before any timezone
    * processing or rank sorting happens.
    */
-  if (isFirstKrumperCompany(sheetName)) {
+  if (
+    !schuetzen &&
+    isFirstKrumperCompany(sheetName)
+  ) {
     const entryDate =
       getCurrentOrbatDate();
 
@@ -1827,7 +2200,7 @@ async function addMemberToSheet({
         date: entryDate
       }
     );
-  } else {
+  } else if (!schuetzen) {
     /*
      * A date must NEVER follow a member into another company.
      * Explicitly blank H on every non-1. Krümper-Kompanie write in case
@@ -4420,6 +4793,14 @@ client.on(
             )
             ?.trim() || null;
 
+        const newPlatoonValue =
+          interaction.options
+            .getString(
+              "new_platoon",
+              false
+            )
+            ?.trim() || null;
+
         const existingMember =
           await findMemberByDiscordId(
             discordMember.id
@@ -4444,14 +4825,63 @@ client.on(
             newRegimentValue
           );
 
+        let destinationPlatoon =
+          null;
+
+        if (
+          isSchuetzenRegiment(
+            newRegiment
+          )
+        ) {
+          if (!newPlatoonValue) {
+            await interaction.editReply(
+              [
+                "The transfer was not made.",
+                "",
+                "**Schlesisches Schützen-Bataillon uses a platoon system.**",
+                "Choose **1. Platoon** or **2. Platoon** in the `new_platoon` option and try again."
+              ].join("\n")
+            );
+            return;
+          }
+
+          try {
+            destinationPlatoon =
+              resolveSchuetzenPlatoon(
+                newPlatoonValue
+              );
+          } catch {
+            await interaction.editReply(
+              "That destination platoon is not configured."
+            );
+            return;
+          }
+        }
+
         const sameRegiment =
           existingMember.regiment.spreadsheetId ===
           newRegiment.spreadsheetId;
 
+        const currentPlatoon =
+          isSchuetzenRegiment(
+            existingMember.regiment
+          )
+            ? getSchuetzenPlatoonForRow(
+                existingMember.row
+              )
+            : null;
+
         const sameCompany =
           normalizeText(
             existingMember.companyName
-          ) === normalizeText(newCompany);
+          ) === normalizeText(newCompany) &&
+          (
+            !isSchuetzenRegiment(
+              newRegiment
+            ) ||
+            currentPlatoon?.key ===
+              destinationPlatoon?.key
+          );
 
         const availableCompanies =
           await getCompanySheetNames(
@@ -4501,10 +4931,16 @@ client.on(
           requestedNewRank || previousRank;
 
         try {
-          assertCompanyRankAllowed(
-            matchedCompany,
-            finalRank
-          );
+          if (
+            !isSchuetzenRegiment(
+              newRegiment
+            )
+          ) {
+            assertCompanyRankAllowed(
+              matchedCompany,
+              finalRank
+            );
+          }
         } catch (companyRankError) {
           if (
             companyRankError?.message ===
@@ -4572,7 +5008,9 @@ client.on(
             spreadsheetId:
               existingMember.regiment.spreadsheetId,
             sheetName:
-              existingMember.companyName
+              existingMember.companyName,
+            platoon:
+              currentPlatoon
           });
 
           existingMember.row =
@@ -4697,7 +5135,9 @@ client.on(
             rank:
               finalRank,
             timezone:
-              memberRecord.timezone
+              memberRecord.timezone,
+            platoon:
+              destinationPlatoon
           });
 
         try {
@@ -4766,7 +5206,9 @@ client.on(
           spreadsheetId:
             newRegiment.spreadsheetId,
           sheetName:
-            matchedCompany
+            matchedCompany,
+          platoon:
+            destinationPlatoon
         });
 
         destinationRow =
@@ -5977,6 +6419,14 @@ client.on(
         .getString("timezone", true)
         .trim();
 
+      const platoonValue =
+        interaction.options
+          .getString(
+            "platoon",
+            false
+          )
+          ?.trim() || null;
+
       if (!rank) {
         await interaction.editReply(
           "The rank cannot be empty."
@@ -5992,6 +6442,38 @@ client.on(
       }
 
       const regiment = resolveRegiment(regimentValue);
+
+      let schuetzenPlatoon = null;
+
+      if (
+        isSchuetzenRegiment(
+          regiment
+        )
+      ) {
+        if (!platoonValue) {
+          await interaction.editReply(
+            [
+              "The member was not added.",
+              "",
+              "**Schlesisches Schützen-Bataillon uses a platoon system.**",
+              "Select either **1. Platoon** or **2. Platoon** in the `platoon` option and try again."
+            ].join("\n")
+          );
+          return;
+        }
+
+        try {
+          schuetzenPlatoon =
+            resolveSchuetzenPlatoon(
+              platoonValue
+            );
+        } catch {
+          await interaction.editReply(
+            "That platoon is not configured. Select 1. Platoon or 2. Platoon."
+          );
+          return;
+        }
+      }
 
       const availableCompanies =
         await getCompanySheetNames(
@@ -6036,10 +6518,16 @@ client.on(
       });
 
       try {
-        assertCompanyRankAllowed(
-          matchedCompany,
-          rank
-        );
+        if (
+          !isSchuetzenRegiment(
+            regiment
+          )
+        ) {
+          assertCompanyRankAllowed(
+            matchedCompany,
+            rank
+          );
+        }
       } catch (companyRankError) {
         if (
           companyRankError?.message ===
@@ -6109,7 +6597,9 @@ client.on(
         robloxUsername,
         discordId: discordMember.id,
         rank,
-        timezone
+        timezone,
+        platoon:
+          schuetzenPlatoon
       });
 
       let timezoneResult = null;
@@ -6138,7 +6628,9 @@ client.on(
         spreadsheetId:
           regiment.spreadsheetId,
         sheetName:
-          matchedCompany
+          matchedCompany,
+        platoon:
+          schuetzenPlatoon
       });
 
       row =
