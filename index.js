@@ -2999,7 +2999,8 @@ client.on(
       interaction.commandName !== "orginize" &&
       interaction.commandName !== "memberinfo" &&
       interaction.commandName !== "companyinfo" &&
-      interaction.commandName !== "missingattendance"
+      interaction.commandName !== "missingattendance" &&
+      interaction.commandName !== "getsheet"
     ) {
       return;
     }
@@ -3016,6 +3017,77 @@ client.on(
       return;
     }
 
+
+    if (interaction.commandName === "getsheet") {
+      try {
+        await interaction.deferReply({
+          flags:
+            MessageFlags.Ephemeral
+        });
+
+        const regimentValue =
+          interaction.options
+            .getString(
+              "regiment",
+              true
+            )
+            .trim();
+
+        const regiment =
+          resolveRegiment(
+            regimentValue
+          );
+
+        const sheetUrl =
+          `https://docs.google.com/spreadsheets/d/${regiment.spreadsheetId}/edit`;
+
+        await interaction.editReply(
+          [
+            "**Regiment ORBAT Sheet**",
+            "",
+            `**Regiment:** ${regiment.displayName}`,
+            "",
+            `[Open Google Sheet](${sheetUrl})`
+          ].join("\n")
+        );
+
+        return;
+      } catch (error) {
+        console.error(
+          "Failed to retrieve regiment sheet:"
+        );
+        console.error(error);
+
+        const errorMessage =
+          error?.message ||
+          "Unknown sheet lookup error.";
+
+        try {
+          if (
+            interaction.deferred ||
+            interaction.replied
+          ) {
+            await interaction.editReply(
+              `The regiment sheet could not be retrieved: ${errorMessage}`
+            );
+          } else {
+            await interaction.reply({
+              content:
+                `The regiment sheet could not be retrieved: ${errorMessage}`,
+              flags:
+                MessageFlags.Ephemeral
+            });
+          }
+        } catch (replyError) {
+          console.error(
+            "Failed to send getsheet error reply:"
+          );
+          console.error(replyError);
+        }
+
+        return;
+      }
+    }
 
     if (interaction.commandName === "memberinfo") {
       try {

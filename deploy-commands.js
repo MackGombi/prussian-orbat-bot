@@ -242,6 +242,22 @@ const commands = [
     .toJSON(),
 
   new SlashCommandBuilder()
+    .setName("getsheet")
+    .setDescription(
+      "Provides a link to the selected regiment's ORBAT Google Sheet."
+    )
+    .addStringOption(option =>
+      option
+        .setName("regiment")
+        .setDescription(
+          "Select the regiment."
+        )
+        .setRequired(true)
+        .addChoices(...REGIMENT_CHOICES)
+    )
+    .toJSON(),
+
+  new SlashCommandBuilder()
     .setName("memberinfo")
     .setDescription("Shows a member's Grand ORBAT information and attendance.")
     .addUserOption(option =>
@@ -363,7 +379,7 @@ const rest = new REST({
 async function deployCommands() {
   try {
     console.log(
-      "Registering ORBAT commands including /memberinfo, /companyinfo, /missingattendance, and /orginize..."
+      "Registering ORBAT commands including /getsheet, /memberinfo, /companyinfo, /missingattendance, and /orginize..."
     );
 
     await rest.put(
