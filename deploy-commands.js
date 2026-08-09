@@ -242,6 +242,95 @@ const commands = [
     .toJSON(),
 
   new SlashCommandBuilder()
+    .setName("roster")
+    .setDescription(
+      "Shows a company roster in rank order."
+    )
+    .addStringOption(option =>
+      option
+        .setName("regiment")
+        .setDescription("Select the regiment.")
+        .setRequired(true)
+        .addChoices(...REGIMENT_CHOICES)
+    )
+    .addStringOption(option =>
+      option
+        .setName("company")
+        .setDescription("Select the company.")
+        .setRequired(true)
+        .setAutocomplete(true)
+    )
+    .toJSON(),
+
+  new SlashCommandBuilder()
+    .setName("strength")
+    .setDescription(
+      "Shows regiment or Grand ORBAT strength."
+    )
+    .addStringOption(option =>
+      option
+        .setName("regiment")
+        .setDescription(
+          "Optionally select one regiment."
+        )
+        .setRequired(false)
+        .addChoices(...REGIMENT_CHOICES)
+    )
+    .toJSON(),
+
+  new SlashCommandBuilder()
+    .setName("attendanceview")
+    .setDescription(
+      "Shows attendance for a company and day."
+    )
+    .addStringOption(option =>
+      option
+        .setName("regiment")
+        .setDescription("Select the regiment.")
+        .setRequired(true)
+        .addChoices(...REGIMENT_CHOICES)
+    )
+    .addStringOption(option =>
+      option
+        .setName("company")
+        .setDescription("Select the company.")
+        .setRequired(true)
+        .setAutocomplete(true)
+    )
+    .addStringOption(option =>
+      option
+        .setName("day")
+        .setDescription("Select the attendance day.")
+        .setRequired(true)
+        .addChoices(
+          { name: "Monday", value: "Monday" },
+          { name: "Tuesday", value: "Tuesday" },
+          { name: "Wednesday", value: "Wednesday" },
+          { name: "Thursday", value: "Thursday" },
+          { name: "Friday", value: "Friday" },
+          { name: "Saturday", value: "Saturday" },
+          { name: "Sunday", value: "Sunday" }
+        )
+    )
+    .toJSON(),
+
+  new SlashCommandBuilder()
+    .setName("audit")
+    .setDescription(
+      "Audits the Grand ORBAT for roster problems."
+    )
+    .addStringOption(option =>
+      option
+        .setName("regiment")
+        .setDescription(
+          "Optionally audit only one regiment."
+        )
+        .setRequired(false)
+        .addChoices(...REGIMENT_CHOICES)
+    )
+    .toJSON(),
+
+  new SlashCommandBuilder()
     .setName("getsheet")
     .setDescription(
       "Provides a link to the selected regiment's ORBAT Google Sheet."
@@ -379,7 +468,7 @@ const rest = new REST({
 async function deployCommands() {
   try {
     console.log(
-      "Registering ORBAT commands including /getsheet, /memberinfo, /companyinfo, /missingattendance, and /orginize..."
+      "Registering ORBAT commands including /roster, /strength, /attendanceview, /audit, /getsheet, and existing commands..."
     );
 
     await rest.put(

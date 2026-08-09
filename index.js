@@ -801,6 +801,267 @@ async function getMissingAttendanceMembers({
     );
 }
 
+
+async function getCompanyAttendanceView({
+  spreadsheetId,
+  sheetName,
+  day
+}) {
+  const attendanceColumn =
+    getAttendanceColumn(
+      sheetName,
+      day
+    );
+
+  const safeSheetName =
+    escapeSheetName(sheetName);
+
+  const lastMemberRow =
+    getLastMemberRow(sheetName);
+
+  const lastColumn =
+    isSecondKrumperCompany(sheetName)
+      ? "I"
+      : "N";
+
+  const response =
+    await sheets.spreadsheets.values.get({
+      spreadsheetId,
+      range:
+        `${safeSheetName}!C${FIRST_MEMBER_ROW}:` +
+        `${lastColumn}${lastMemberRow}`,
+      majorDimension: "ROWS"
+    });
+
+  const attendanceIndex =
+    columnLetterToNumber(attendanceColumn) -
+    columnLetterToNumber("C");
+
+  const members =
+    (response.data.values || [])
+      .map((row, index) => ({
+        robloxUsername:
+          String(row?.[0] || "").trim(),
+        discordId:
+          String(row?.[1] || "").trim(),
+        rank:
+          String(row?.[2] || "").trim(),
+        attendance:
+          String(
+            row?.[attendanceIndex] || ""
+          ).trim(),
+        row:
+          FIRST_MEMBER_ROW + index
+      }))
+      .filter(
+        member =>
+          member.robloxUsername ||
+          member.discordId ||
+          member.rank
+      );
+
+  const groups =
+    new Map();
+
+  for (const status of ATTENDANCE_STATUS_CHOICES) {
+    groups.set(status, []);
+  }
+
+  groups.set("BLANK", []);
+
+  for (const member of members) {
+    const normalizedStatus =
+      ATTENDANCE_STATUS_CHOICES.find(
+        status =>
+          normalizeText(status) ===
+          normalizeText(member.attendance)
+      );
+
+    const bucket =
+      normalizedStatus || "BLANK";
+
+    groups.get(bucket).push(member);
+  }
+
+  return {
+    members,
+    groups,
+    attendanceColumn
+  };
+}
+
+async function getCompanyAuditRows({
+  spreadsheetId,
+  sheetName
+}) {
+  const safeSheetName =
+    escapeSheetName(sheetName);
+
+  const lastMemberRow =
+    getLastMemberRow(sheetName);
+
+  const response =
+    await sheets.spreadsheets.values.get({
+      spreadsheetId,
+      range:
+        `${safeSheetName}!C${FIRST_MEMBER_ROW}:F${lastMemberRow}`,
+      majorDimension: "ROWS"
+    });
+
+  return (response.data.values || [])
+    .map((row, index) => ({
+      robloxUsername:
+        String(row?.[0] || "").trim(),
+      discordId:
+        String(row?.[1] || "").trim(),
+      rank:
+        String(row?.[2] || "").trim(),
+      timezone:
+        String(row?.[3] || "").trim(),
+      row:
+        FIRST_MEMBER_ROW + index
+    }))
+    .filter(
+      member =>
+        member.robloxUsername ||
+        member.discordId ||
+        member.rank ||
+        member.timezone
+    );
+}
+
+async function auditOrbatRegiments(
+  regiments
+) {
+  const issues = [];
+  const discordLocations =
+    new Map();
+  const usernameLocations =
+    new Map();
+
+  for (const regiment of regiments) {
+    const companies =
+      await getCompanySheetNames(
+        regiment
+      );
+
+    for (const company of companies) {
+      const rows =
+        await getCompanyAuditRows({
+          spreadsheetId:
+            regiment.spreadsheetId,
+          sheetName:
+            company
+        });
+
+      for (const member of rows) {
+        const location =
+          `${regiment.displayName} / ${company} / Row ${member.row}`;
+
+        if (!member.robloxUsername) {
+          issues.push(
+            `Missing Roblox username — ${location}`
+          );
+        }
+
+        if (!member.discordId) {
+          issues.push(
+            `Missing Discord ID — ${location}`
+          );
+        }
+
+        if (!member.rank) {
+          issues.push(
+            `Missing rank — ${location}`
+          );
+        } else if (
+          !RANK_SORT_PRIORITY.has(
+            normalizeText(member.rank)
+          )
+        ) {
+          issues.push(
+            `Unknown rank "${member.rank}" — ${location}`
+          );
+        }
+
+        if (!member.timezone) {
+          issues.push(
+            `Missing timezone — ${location}`
+          );
+        }
+
+        if (
+          isFirstKrumperCompany(
+            company
+          ) &&
+          member.rank &&
+          !isRekrutRank(
+            member.rank
+          )
+        ) {
+          issues.push(
+            `Non-Rekrut in 1. Krümper-Kompanie (${member.rank}) — ${location}`
+          );
+        }
+
+        if (
+          !isFirstKrumperCompany(
+            company
+          ) &&
+          isRekrutRank(
+            member.rank
+          )
+        ) {
+          issues.push(
+            `Rekrut outside 1. Krümper-Kompanie — ${location}`
+          );
+        }
+
+        if (member.discordId) {
+          if (
+            discordLocations.has(
+              member.discordId
+            )
+          ) {
+            issues.push(
+              `Duplicate Discord ID ${member.discordId} — ${discordLocations.get(member.discordId)} AND ${location}`
+            );
+          } else {
+            discordLocations.set(
+              member.discordId,
+              location
+            );
+          }
+        }
+
+        if (member.robloxUsername) {
+          const normalizedUsername =
+            normalizeText(
+              member.robloxUsername
+            );
+
+          if (
+            usernameLocations.has(
+              normalizedUsername
+            )
+          ) {
+            issues.push(
+              `Duplicate Roblox username ${member.robloxUsername} — ${usernameLocations.get(normalizedUsername)} AND ${location}`
+            );
+          } else {
+            usernameLocations.set(
+              normalizedUsername,
+              location
+            );
+          }
+        }
+      }
+    }
+  }
+
+  return issues;
+}
+
 async function setAttendanceMarker({
   spreadsheetId,
   sheetName,
@@ -2914,7 +3175,11 @@ client.on(
         interaction.commandName ===
           "companyinfo" ||
         interaction.commandName ===
-          "missingattendance";
+          "missingattendance" ||
+        interaction.commandName ===
+          "roster" ||
+        interaction.commandName ===
+          "attendanceview";
 
       if (!isCompanyAutocompleteCommand) {
         return;
@@ -3000,7 +3265,11 @@ client.on(
       interaction.commandName !== "memberinfo" &&
       interaction.commandName !== "companyinfo" &&
       interaction.commandName !== "missingattendance" &&
-      interaction.commandName !== "getsheet"
+      interaction.commandName !== "getsheet" &&
+      interaction.commandName !== "roster" &&
+      interaction.commandName !== "strength" &&
+      interaction.commandName !== "attendanceview" &&
+      interaction.commandName !== "audit"
     ) {
       return;
     }
@@ -3017,6 +3286,512 @@ client.on(
       return;
     }
 
+
+    if (interaction.commandName === "roster") {
+      try {
+        await interaction.deferReply({
+          flags: MessageFlags.Ephemeral
+        });
+
+        const regimentValue =
+          interaction.options
+            .getString(
+              "regiment",
+              true
+            )
+            .trim();
+
+        const company =
+          interaction.options
+            .getString(
+              "company",
+              true
+            )
+            .trim();
+
+        const regiment =
+          resolveRegiment(
+            regimentValue
+          );
+
+        const availableCompanies =
+          await getCompanySheetNames(
+            regiment
+          );
+
+        const matchedCompany =
+          availableCompanies.find(
+            name =>
+              normalizeText(name) ===
+              normalizeText(company)
+          );
+
+        if (!matchedCompany) {
+          await interaction.editReply(
+            "The selected company could not be found."
+          );
+          return;
+        }
+
+        const summary =
+          await getCompanyRosterSummary({
+            spreadsheetId:
+              regiment.spreadsheetId,
+            sheetName:
+              matchedCompany
+          });
+
+        const members =
+          [...summary.members]
+            .sort((a, b) => {
+              const rankA =
+                RANK_SORT_PRIORITY.get(
+                  normalizeText(a.rank)
+                ) ?? 999;
+
+              const rankB =
+                RANK_SORT_PRIORITY.get(
+                  normalizeText(b.rank)
+                ) ?? 999;
+
+              if (rankA !== rankB) {
+                return rankA - rankB;
+              }
+
+              return a.robloxUsername.localeCompare(
+                b.robloxUsername,
+                undefined,
+                {
+                  sensitivity: "base"
+                }
+              );
+            });
+
+        const rosterLines =
+          members
+            .slice(0, 30)
+            .map((member, index) => {
+              const identity =
+                member.discordId
+                  ? `<@${member.discordId}>`
+                  : member.robloxUsername ||
+                    "Unknown";
+
+              return (
+                `${index + 1}. **${member.rank || "No Rank"}** — ` +
+                `${identity}` +
+                (
+                  member.robloxUsername
+                    ? ` (${member.robloxUsername})`
+                    : ""
+                )
+              );
+            });
+
+        const lines = [
+          "**Kompanie Roster**",
+          "",
+          `**Regiment:** ${regiment.displayName}`,
+          `**Kompanie:** ${matchedCompany}`,
+          `**Strength:** ${members.length}`,
+          "",
+          ...(
+            rosterLines.length
+              ? rosterLines
+              : ["No members found."]
+          )
+        ];
+
+        if (
+          members.length >
+          rosterLines.length
+        ) {
+          lines.push(
+            `…and ${members.length - rosterLines.length} more member(s).`
+          );
+        }
+
+        await interaction.editReply(
+          lines.join("\n").slice(0, 1950)
+        );
+
+        return;
+      } catch (error) {
+        console.error(
+          "Failed to retrieve roster:"
+        );
+        console.error(error);
+
+        await interaction.editReply(
+          `Roster could not be retrieved: ${error?.message || "Unknown error."}`
+        );
+
+        return;
+      }
+    }
+
+    if (interaction.commandName === "strength") {
+      try {
+        await interaction.deferReply({
+          flags: MessageFlags.Ephemeral
+        });
+
+        const regimentValue =
+          interaction.options.getString(
+            "regiment",
+            false
+          );
+
+        const targetRegiments =
+          regimentValue
+            ? [
+                resolveRegiment(
+                  regimentValue
+                )
+              ]
+            : REGIMENTS;
+
+        const regimentResults = [];
+        let grandTotal = 0;
+
+        for (
+          const regiment of
+          targetRegiments
+        ) {
+          const companies =
+            await getCompanySheetNames(
+              regiment
+            );
+
+          const companyResults = [];
+          let regimentTotal = 0;
+
+          for (
+            const company of companies
+          ) {
+            const summary =
+              await getCompanyRosterSummary({
+                spreadsheetId:
+                  regiment.spreadsheetId,
+                sheetName:
+                  company
+              });
+
+            companyResults.push({
+              company,
+              strength:
+                summary.members.length
+            });
+
+            regimentTotal +=
+              summary.members.length;
+          }
+
+          regimentResults.push({
+            regiment,
+            regimentTotal,
+            companyResults
+          });
+
+          grandTotal +=
+            regimentTotal;
+        }
+
+        const lines = [
+          regimentValue
+            ? "**Regiment Strength**"
+            : "**Prussian Army Strength**",
+          "",
+          `**Total Strength:** ${grandTotal}`
+        ];
+
+        for (
+          const result of
+          regimentResults
+        ) {
+          lines.push(
+            "",
+            `**${result.regiment.displayName}: ${result.regimentTotal}**`
+          );
+
+          if (regimentValue) {
+            for (
+              const companyResult of
+              result.companyResults
+            ) {
+              lines.push(
+                `• ${companyResult.company}: ${companyResult.strength}`
+              );
+            }
+          }
+        }
+
+        await interaction.editReply(
+          lines.join("\n").slice(0, 1950)
+        );
+
+        return;
+      } catch (error) {
+        console.error(
+          "Failed to retrieve strength:"
+        );
+        console.error(error);
+
+        await interaction.editReply(
+          `Strength could not be retrieved: ${error?.message || "Unknown error."}`
+        );
+
+        return;
+      }
+    }
+
+    if (
+      interaction.commandName ===
+      "attendanceview"
+    ) {
+      try {
+        await interaction.deferReply({
+          flags: MessageFlags.Ephemeral
+        });
+
+        const regimentValue =
+          interaction.options
+            .getString(
+              "regiment",
+              true
+            )
+            .trim();
+
+        const company =
+          interaction.options
+            .getString(
+              "company",
+              true
+            )
+            .trim();
+
+        const day =
+          interaction.options
+            .getString(
+              "day",
+              true
+            )
+            .trim();
+
+        const regiment =
+          resolveRegiment(
+            regimentValue
+          );
+
+        const companies =
+          await getCompanySheetNames(
+            regiment
+          );
+
+        const matchedCompany =
+          companies.find(
+            name =>
+              normalizeText(name) ===
+              normalizeText(company)
+          );
+
+        if (!matchedCompany) {
+          await interaction.editReply(
+            "The selected company could not be found."
+          );
+          return;
+        }
+
+        if (
+          isAttendanceExcludedCompany(
+            matchedCompany
+          )
+        ) {
+          await interaction.editReply(
+            "Attendance is not tracked for that company."
+          );
+          return;
+        }
+
+        let view;
+
+        try {
+          view =
+            await getCompanyAttendanceView({
+              spreadsheetId:
+                regiment.spreadsheetId,
+              sheetName:
+                matchedCompany,
+              day
+            });
+        } catch (
+          attendanceError
+        ) {
+          if (
+            attendanceError?.message ===
+            "SECOND_KRUMPER_WEEKEND_ONLY"
+          ) {
+            await interaction.editReply(
+              "2. Krümper-Kompanie only tracks Saturday and Sunday attendance."
+            );
+            return;
+          }
+
+          throw attendanceError;
+        }
+
+        const lines = [
+          "**Attendance View**",
+          "",
+          `**Regiment:** ${regiment.displayName}`,
+          `**Kompanie:** ${matchedCompany}`,
+          `**Day:** ${day}`,
+          `**Total Members:** ${view.members.length}`,
+          ""
+        ];
+
+        for (
+          const status of
+          [
+            ...ATTENDANCE_STATUS_CHOICES,
+            "BLANK"
+          ]
+        ) {
+          const members =
+            view.groups.get(status) || [];
+
+          if (!members.length) {
+            continue;
+          }
+
+          lines.push(
+            `**${status}: ${members.length}**`
+          );
+
+          for (
+            const member of
+            members.slice(0, 8)
+          ) {
+            const identity =
+              member.discordId
+                ? `<@${member.discordId}>`
+                : member.robloxUsername ||
+                  "Unknown";
+
+            lines.push(
+              `• ${identity}`
+            );
+          }
+
+          if (members.length > 8) {
+            lines.push(
+              `• …and ${members.length - 8} more`
+            );
+          }
+
+          lines.push("");
+        }
+
+        await interaction.editReply(
+          lines.join("\n").slice(0, 1950)
+        );
+
+        return;
+      } catch (error) {
+        console.error(
+          "Failed to retrieve attendance view:"
+        );
+        console.error(error);
+
+        await interaction.editReply(
+          `Attendance view could not be retrieved: ${error?.message || "Unknown error."}`
+        );
+
+        return;
+      }
+    }
+
+    if (interaction.commandName === "audit") {
+      try {
+        await interaction.deferReply({
+          flags: MessageFlags.Ephemeral
+        });
+
+        const regimentValue =
+          interaction.options.getString(
+            "regiment",
+            false
+          );
+
+        const targetRegiments =
+          regimentValue
+            ? [
+                resolveRegiment(
+                  regimentValue
+                )
+              ]
+            : REGIMENTS;
+
+        const issues =
+          await auditOrbatRegiments(
+            targetRegiments
+          );
+
+        const lines = [
+          "**Grand ORBAT Audit**",
+          "",
+          `**Scope:** ${
+            regimentValue
+              ? targetRegiments[0].displayName
+              : "All Regiments"
+          }`,
+          `**Issues Found:** ${issues.length}`,
+          ""
+        ];
+
+        if (!issues.length) {
+          lines.push(
+            "No roster issues were found."
+          );
+        } else {
+          lines.push(
+            "**Issues:**"
+          );
+
+          for (
+            const issue of
+            issues.slice(0, 18)
+          ) {
+            lines.push(
+              `• ${issue}`
+            );
+          }
+
+          if (issues.length > 18) {
+            lines.push(
+              `• …and ${issues.length - 18} more issue(s).`
+            );
+          }
+        }
+
+        await interaction.editReply(
+          lines.join("\n").slice(0, 1950)
+        );
+
+        return;
+      } catch (error) {
+        console.error(
+          "Failed to audit ORBAT:"
+        );
+        console.error(error);
+
+        await interaction.editReply(
+          `The ORBAT audit could not be completed: ${error?.message || "Unknown error."}`
+        );
+
+        return;
+      }
+    }
 
     if (interaction.commandName === "getsheet") {
       try {
