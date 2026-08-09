@@ -95,7 +95,7 @@ const SCHUETZEN_POSITIONS = {
     displayName: "1. Platoon",
     type: "platoon",
     firstRow: 7,
-    lastRow: 15
+    lastRow: 16
   },
   "2_platoon": {
     displayName: "2. Platoon",
