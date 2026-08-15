@@ -448,7 +448,7 @@ const commands = [
     .toJSON(),
 
   new SlashCommandBuilder()
-    .setName("orginize")
+    .setName("organize")
     .setDescription(
       "Organizes a company roster from highest rank to lowest rank."
     )
