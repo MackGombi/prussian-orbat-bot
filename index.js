@@ -2631,24 +2631,24 @@ async function handleAttendanceDayAutocomplete(
 
 /*
 |--------------------------------------------------------------------------
-| Interactive attendance board
+| Multi-day interactive attendance board
 |--------------------------------------------------------------------------
 |
 | /attendance flow:
 | 1. Regiment + company
-| 2. Choose attendance day
+| 2. Choose one or more attendance days
 | 3. Bot loads the actual ORBAT company roster
-| 4. Choose an attendance status
-| 5. Select roster members for that status
-| 6. Repeat until complete
-| 7. Optionally mark every unmarked member AWOL
-| 8. Review
+| 4. Edit one selected day at a time
+| 5. Choose an attendance status
+| 6. Select roster members for that status
+| 7. Switch days, copy previous day, or mark remaining members AWOL
+| 8. Review all selected days
 | 9. Submit all changes to Google Sheets in one batch
 |--------------------------------------------------------------------------
 */
 
 const ATTENDANCE_SESSION_TTL_MS =
-  15 * 60 * 1000;
+  20 * 60 * 1000;
 
 const attendanceSessions =
   new Map();
@@ -2796,23 +2796,48 @@ async function ensureAttendanceRoster(
   return session.roster;
 }
 
-function getAttendancePendingMap(
-  session
+function getAvailableAttendanceDays(
+  company
 ) {
-  if (!(session.pending instanceof Map)) {
-    session.pending = new Map();
-  }
-
-  return session.pending;
+  return isSecondKrumperCompany(company)
+    ? ["Saturday", "Sunday"]
+    : ATTENDANCE_DAYS;
 }
 
-function getAttendanceCounts(
-  session
+function getDayPendingMap(
+  session,
+  day = session.activeDay
+) {
+  if (!(session.pendingByDay instanceof Map)) {
+    session.pendingByDay = new Map();
+  }
+
+  if (!day) {
+    return new Map();
+  }
+
+  if (!session.pendingByDay.has(day)) {
+    session.pendingByDay.set(
+      day,
+      new Map()
+    );
+  }
+
+  return session.pendingByDay.get(day);
+}
+
+function getAttendanceCountsForDay(
+  session,
+  day = session.activeDay
 ) {
   const pending =
-    getAttendancePendingMap(session);
+    getDayPendingMap(
+      session,
+      day
+    );
 
-  const counts = new Map();
+  const counts =
+    new Map();
 
   for (
     const status of
@@ -2831,6 +2856,40 @@ function getAttendanceCounts(
   return counts;
 }
 
+function getAttendanceDayIndex(
+  session,
+  day = session.activeDay
+) {
+  return Array.isArray(session.days)
+    ? session.days.indexOf(day)
+    : -1;
+}
+
+function getPreviousAttendanceDay(
+  session
+) {
+  const index =
+    getAttendanceDayIndex(session);
+
+  return index > 0
+    ? session.days[index - 1]
+    : null;
+}
+
+function getNextAttendanceDay(
+  session
+) {
+  const index =
+    getAttendanceDayIndex(session);
+
+  return (
+    index >= 0 &&
+    index < session.days.length - 1
+  )
+    ? session.days[index + 1]
+    : null;
+}
+
 function attendanceSessionHeader(
   session
 ) {
@@ -2839,14 +2898,21 @@ function attendanceSessionHeader(
       ? session.roster.length
       : 0;
 
+  const selectedDays =
+    Array.isArray(session.days) &&
+    session.days.length > 0
+      ? session.days.join(", ")
+      : "Not selected";
+
   return [
-    "**Company Attendance Board**",
+    "**Multi-Day Company Attendance Board**",
     "",
     `**Regiment:** ${session.regimentDisplayName}`,
     `**Company:** ${session.company}`,
-    session.day
-      ? `**Day:** ${session.day}`
-      : "**Day:** Not selected",
+    `**Selected Days:** ${selectedDays}`,
+    session.activeDay
+      ? `**Editing:** ${session.activeDay}`
+      : null,
     rosterCount > 0
       ? `**Company Strength:** ${rosterCount}`
       : null
@@ -2857,10 +2923,14 @@ function attendanceBoardLines(
   session
 ) {
   const pending =
-    getAttendancePendingMap(session);
+    getDayPendingMap(
+      session
+    );
 
   const counts =
-    getAttendanceCounts(session);
+    getAttendanceCountsForDay(
+      session
+    );
 
   const rosterCount =
     Array.isArray(session.roster)
@@ -2873,9 +2943,13 @@ function attendanceBoardLines(
       rosterCount - pending.size
     );
 
+  const dayIndex =
+    getAttendanceDayIndex(session);
+
   const lines = [
     ...attendanceSessionHeader(session),
     "",
+    `**Day ${dayIndex + 1} of ${session.days.length}**`,
     `**Unmarked:** ${unmarked}`,
     `**Present:** ${counts.get("PRES") || 0}`,
     `**Excused:** ${counts.get("EXC") || 0}`,
@@ -2904,8 +2978,8 @@ function attendanceBoardLines(
 
   lines.push(
     "",
-    "Choose a status below, then select the members who should receive it.",
-    "Nothing is written to Google Sheets until **Submit Attendance**."
+    "Choose a status, then select the roster members for that status.",
+    "Switch days at any time. Nothing is written until **Submit All Attendance**."
   );
 
   return lines;
@@ -2915,22 +2989,22 @@ function buildAttendanceDayComponents(
   session
 ) {
   const availableDays =
-    isSecondKrumperCompany(
+    getAvailableAttendanceDays(
       session.company
-    )
-      ? ["Saturday", "Sunday"]
-      : ATTENDANCE_DAYS;
+    );
 
   const dayMenu =
     new StringSelectMenuBuilder()
       .setCustomId(
-        `attendance_day:${session.token}`
+        `attendance_days:${session.token}`
       )
       .setPlaceholder(
-        "Choose the attendance day"
+        "Choose one or more attendance days"
       )
       .setMinValues(1)
-      .setMaxValues(1)
+      .setMaxValues(
+        availableDays.length
+      )
       .addOptions(
         availableDays.map(day => ({
           label: day,
@@ -2957,6 +3031,28 @@ function buildAttendanceDayComponents(
 function buildAttendanceBoardComponents(
   session
 ) {
+  const daySwitch =
+    new StringSelectMenuBuilder()
+      .setCustomId(
+        `attendance_switch_day:${session.token}`
+      )
+      .setPlaceholder(
+        `Editing ${session.activeDay}`
+      )
+      .setMinValues(1)
+      .setMaxValues(1)
+      .addOptions(
+        session.days.map(day => ({
+          label:
+            day === session.activeDay
+              ? `${day} (Current)`
+              : day,
+          value: day,
+          default:
+            day === session.activeDay
+        }))
+      );
+
   const statusOptions =
     ATTENDANCE_STATUS_CHOICES
       .map(status => {
@@ -2991,6 +3087,45 @@ function buildAttendanceBoardComponents(
       .setMaxValues(1)
       .addOptions(statusOptions);
 
+  const previous =
+    new ButtonBuilder()
+      .setCustomId(
+        `attendance_previous_day:${session.token}`
+      )
+      .setLabel("Previous Day")
+      .setStyle(ButtonStyle.Secondary)
+      .setDisabled(
+        !getPreviousAttendanceDay(
+          session
+        )
+      );
+
+  const next =
+    new ButtonBuilder()
+      .setCustomId(
+        `attendance_next_day:${session.token}`
+      )
+      .setLabel("Next Day")
+      .setStyle(ButtonStyle.Secondary)
+      .setDisabled(
+        !getNextAttendanceDay(
+          session
+        )
+      );
+
+  const copyPrevious =
+    new ButtonBuilder()
+      .setCustomId(
+        `attendance_copy_previous:${session.token}`
+      )
+      .setLabel("Copy Previous Day")
+      .setStyle(ButtonStyle.Primary)
+      .setDisabled(
+        !getPreviousAttendanceDay(
+          session
+        )
+      );
+
   const remainingAwol =
     new ButtonBuilder()
       .setCustomId(
@@ -3004,23 +3139,23 @@ function buildAttendanceBoardComponents(
       .setCustomId(
         `attendance_review:${session.token}`
       )
-      .setLabel("Review Attendance")
+      .setLabel("Review All Days")
       .setStyle(ButtonStyle.Success);
 
-  const changeDay =
+  const clearDay =
     new ButtonBuilder()
       .setCustomId(
-        `attendance_change_day:${session.token}`
+        `attendance_clear_day:${session.token}`
       )
-      .setLabel("Change Day")
+      .setLabel("Clear Current Day")
       .setStyle(ButtonStyle.Secondary);
 
-  const clearAll =
+  const changeDays =
     new ButtonBuilder()
       .setCustomId(
-        `attendance_clear_all:${session.token}`
+        `attendance_change_days:${session.token}`
       )
-      .setLabel("Clear All")
+      .setLabel("Change Selected Days")
       .setStyle(ButtonStyle.Secondary);
 
   const cancel =
@@ -3033,13 +3168,21 @@ function buildAttendanceBoardComponents(
 
   return [
     new ActionRowBuilder()
+      .addComponents(daySwitch),
+    new ActionRowBuilder()
       .addComponents(statusMenu),
     new ActionRowBuilder()
       .addComponents(
+        previous,
+        next,
+        copyPrevious,
         remainingAwol,
-        review,
-        changeDay,
-        clearAll,
+        review
+      ),
+    new ActionRowBuilder()
+      .addComponents(
+        clearDay,
+        changeDays,
         cancel
       )
   ];
@@ -3054,7 +3197,9 @@ function buildAttendanceRosterComponents(
       : [];
 
   const pending =
-    getAttendancePendingMap(session);
+    getDayPendingMap(
+      session
+    );
 
   const options =
     roster
@@ -3105,8 +3250,8 @@ function buildAttendanceRosterComponents(
         .setPlaceholder(
           session.selectedStatus ===
             "__UNMARK__"
-            ? "Select members to unmark"
-            : `Select members for ${getAttendanceStatusLabel(session.selectedStatus)}`
+            ? `Select ${session.activeDay} members to unmark`
+            : `Select ${session.activeDay} members for ${getAttendanceStatusLabel(session.selectedStatus)}`
         )
         .setMinValues(1)
         .setMaxValues(
@@ -3153,80 +3298,97 @@ function buildAttendanceRosterComponents(
 function attendanceReviewLines(
   session
 ) {
-  const pending =
-    getAttendancePendingMap(session);
-
-  const roster =
+  const rosterCount =
     Array.isArray(session.roster)
-      ? session.roster
-      : [];
-
-  const byStatus =
-    new Map();
-
-  for (
-    const status of
-    ATTENDANCE_STATUS_CHOICES
-  ) {
-    byStatus.set(status, []);
-  }
-
-  for (const member of roster) {
-    const status =
-      pending.get(String(member.row));
-
-    if (!status) {
-      continue;
-    }
-
-    if (!byStatus.has(status)) {
-      byStatus.set(status, []);
-    }
-
-    byStatus.get(status).push(member);
-  }
+      ? session.roster.length
+      : 0;
 
   const lines = [
-    "**Review Attendance**",
+    "**Review Multi-Day Attendance**",
     "",
     `**Regiment:** ${session.regimentDisplayName}`,
     `**Company:** ${session.company}`,
-    `**Day:** ${session.day}`,
-    `**Pending Changes:** ${pending.size}`,
-    `**Unmarked:** ${Math.max(0, roster.length - pending.size)}`
+    `**Company Strength:** ${rosterCount}`,
+    `**Days:** ${session.days.join(", ")}`
   ];
 
-  for (
-    const status of
-    ATTENDANCE_STATUS_CHOICES
-  ) {
-    const members =
-      byStatus.get(status) || [];
+  let totalPending = 0;
 
-    if (members.length === 0) {
-      continue;
-    }
+  for (const day of session.days) {
+    const pending =
+      getDayPendingMap(
+        session,
+        day
+      );
+
+    const counts =
+      getAttendanceCountsForDay(
+        session,
+        day
+      );
+
+    totalPending +=
+      pending.size;
 
     lines.push(
       "",
-      `**${getAttendanceStatusLabel(status)} (${members.length})**`
+      `**${day}**`,
+      `Present: ${counts.get("PRES") || 0} | ` +
+      `Excused: ${counts.get("EXC") || 0} | ` +
+      `AWOL: ${counts.get("AWOL") || 0} | ` +
+      `Unmarked: ${Math.max(0, rosterCount - pending.size)}`
     );
 
-    for (const member of members) {
+    const extras =
+      ATTENDANCE_STATUS_CHOICES
+        .filter(status =>
+          !["PRES", "EXC", "AWOL"].includes(
+            status
+          )
+        )
+        .filter(status =>
+          (counts.get(status) || 0) > 0
+        )
+        .map(
+          status =>
+            `${getAttendanceStatusLabel(status)}: ${counts.get(status)}`
+        );
+
+    if (extras.length > 0) {
       lines.push(
-        member.discordId
-          ? `- <@${member.discordId}> - ${member.robloxUsername}`
-          : `- ${member.robloxUsername}`
+        extras.join(" | ")
       );
     }
   }
 
   lines.push(
     "",
-    "Press **Submit Attendance** to write these changes to Google Sheets."
+    `**Total Pending Entries:** ${totalPending}`,
+    "",
+    "Press **Submit All Attendance** to write every selected day to Google Sheets."
   );
 
   return lines;
+}
+
+function getTotalPendingAttendanceEntries(
+  session
+) {
+  if (!(session.pendingByDay instanceof Map)) {
+    return 0;
+  }
+
+  let total = 0;
+
+  for (const day of session.days || []) {
+    total +=
+      getDayPendingMap(
+        session,
+        day
+      ).size;
+  }
+
+  return total;
 }
 
 function buildAttendanceReviewComponents(
@@ -3235,14 +3397,14 @@ function buildAttendanceReviewComponents(
   const submit =
     new ButtonBuilder()
       .setCustomId(
-        `attendance_submit:${session.token}`
+        `attendance_submit_all:${session.token}`
       )
-      .setLabel("Submit Attendance")
+      .setLabel("Submit All Attendance")
       .setStyle(ButtonStyle.Success)
       .setDisabled(
-        getAttendancePendingMap(
+        getTotalPendingAttendanceEntries(
           session
-        ).size === 0
+        ) === 0
       );
 
   const back =
@@ -3340,23 +3502,15 @@ async function handleAttendanceComponent(
 
   if (
     action ===
-    "attendance_day"
+    "attendance_days"
   ) {
-    const day =
-      interaction.values?.[0];
+    const days =
+      interaction.values || [];
 
-    try {
-      getAttendanceColumn(
-        session.company,
-        day
-      );
-    } catch (error) {
+    if (days.length === 0) {
       await interaction.reply({
         content:
-          error?.message ===
-          "SECOND_KRUMPER_WEEKEND_ONLY"
-            ? "2. Krümper-Kompanie only allows Saturday or Sunday."
-            : "That attendance day is not valid for this company.",
+          "Select at least one attendance day.",
         flags:
           MessageFlags.Ephemeral
       });
@@ -3364,9 +3518,52 @@ async function handleAttendanceComponent(
       return true;
     }
 
-    session.day = day;
-    session.selectedStatus = null;
-    session.pending = new Map();
+    for (const day of days) {
+      try {
+        getAttendanceColumn(
+          session.company,
+          day
+        );
+      } catch (error) {
+        await interaction.reply({
+          content:
+            error?.message ===
+            "SECOND_KRUMPER_WEEKEND_ONLY"
+              ? "2. Krümper-Kompanie only allows Saturday or Sunday."
+              : `The attendance day ${day} is not valid for this company.`,
+          flags:
+            MessageFlags.Ephemeral
+        });
+
+        return true;
+      }
+    }
+
+    const orderedDays =
+      getAvailableAttendanceDays(
+        session.company
+      ).filter(day =>
+        days.includes(day)
+      );
+
+    session.days =
+      orderedDays;
+
+    session.activeDay =
+      session.days[0];
+
+    session.selectedStatus =
+      null;
+
+    session.pendingByDay =
+      new Map();
+
+    for (const day of session.days) {
+      session.pendingByDay.set(
+        day,
+        new Map()
+      );
+    }
 
     await ensureAttendanceRoster(
       session
@@ -3415,6 +3612,176 @@ async function handleAttendanceComponent(
 
   if (
     action ===
+    "attendance_switch_day"
+  ) {
+    const day =
+      String(
+        interaction.values?.[0] || ""
+      ).trim();
+
+    if (
+      !session.days.includes(day)
+    ) {
+      await interaction.reply({
+        content:
+          "That day is not part of this attendance session.",
+        flags:
+          MessageFlags.Ephemeral
+      });
+
+      return true;
+    }
+
+    session.activeDay =
+      day;
+
+    session.selectedStatus =
+      null;
+
+    await interaction.update({
+      content:
+        attendanceBoardLines(
+          session
+        ).join("\n"),
+      components:
+        buildAttendanceBoardComponents(
+          session
+        )
+    });
+
+    return true;
+  }
+
+  if (
+    action ===
+    "attendance_previous_day"
+  ) {
+    const previous =
+      getPreviousAttendanceDay(
+        session
+      );
+
+    if (!previous) {
+      await interaction.reply({
+        content:
+          "There is no previous selected day.",
+        flags:
+          MessageFlags.Ephemeral
+      });
+
+      return true;
+    }
+
+    session.activeDay =
+      previous;
+
+    session.selectedStatus =
+      null;
+
+    await interaction.update({
+      content:
+        attendanceBoardLines(
+          session
+        ).join("\n"),
+      components:
+        buildAttendanceBoardComponents(
+          session
+        )
+    });
+
+    return true;
+  }
+
+  if (
+    action ===
+    "attendance_next_day"
+  ) {
+    const next =
+      getNextAttendanceDay(
+        session
+      );
+
+    if (!next) {
+      await interaction.reply({
+        content:
+          "There is no next selected day.",
+        flags:
+          MessageFlags.Ephemeral
+      });
+
+      return true;
+    }
+
+    session.activeDay =
+      next;
+
+    session.selectedStatus =
+      null;
+
+    await interaction.update({
+      content:
+        attendanceBoardLines(
+          session
+        ).join("\n"),
+      components:
+        buildAttendanceBoardComponents(
+          session
+        )
+    });
+
+    return true;
+  }
+
+  if (
+    action ===
+    "attendance_copy_previous"
+  ) {
+    const previous =
+      getPreviousAttendanceDay(
+        session
+      );
+
+    if (!previous) {
+      await interaction.reply({
+        content:
+          "There is no previous selected day to copy.",
+        flags:
+          MessageFlags.Ephemeral
+      });
+
+      return true;
+    }
+
+    const previousMap =
+      getDayPendingMap(
+        session,
+        previous
+      );
+
+    session.pendingByDay.set(
+      session.activeDay,
+      new Map(previousMap)
+    );
+
+    await interaction.update({
+      content: [
+        ...attendanceBoardLines(
+          session
+        ),
+        "",
+        `Copied all pending attendance from **${previous}** into **${session.activeDay}**.`
+      ].join("\n"),
+      components:
+        buildAttendanceBoardComponents(
+          session
+        )
+    });
+
+    return true;
+  }
+
+  if (
+    action ===
     "attendance_pick_status"
   ) {
     const status =
@@ -3452,8 +3819,8 @@ async function handleAttendanceComponent(
         ),
         "",
         status === "__UNMARK__"
-          ? "Select the roster members whose pending attendance should be cleared."
-          : `Select the roster members to mark as **${getAttendanceStatusLabel(status)}**.`
+          ? `Select the ${session.activeDay} roster members whose pending attendance should be cleared.`
+          : `Select the ${session.activeDay} roster members to mark as **${getAttendanceStatusLabel(status)}**.`
       ].join("\n"),
       components:
         buildAttendanceRosterComponents(
@@ -3472,7 +3839,7 @@ async function handleAttendanceComponent(
       interaction.values || [];
 
     const pending =
-      getAttendancePendingMap(
+      getDayPendingMap(
         session
       );
 
@@ -3506,7 +3873,7 @@ async function handleAttendanceComponent(
           session
         ),
         "",
-        `Updated **${changed}** member(s) on the pending attendance board.`
+        `Updated **${changed}** member(s) for **${session.activeDay}**.`
       ].join("\n"),
       components:
         buildAttendanceBoardComponents(
@@ -3526,7 +3893,7 @@ async function handleAttendanceComponent(
     );
 
     const pending =
-      getAttendancePendingMap(
+      getDayPendingMap(
         session
       );
 
@@ -3551,7 +3918,7 @@ async function handleAttendanceComponent(
           session
         ),
         "",
-        `Marked **${added}** previously unmarked member(s) as **AWOL**.`
+        `Marked **${added}** previously unmarked member(s) as **AWOL** for **${session.activeDay}**.`
       ].join("\n"),
       components:
         buildAttendanceBoardComponents(
@@ -3564,9 +3931,9 @@ async function handleAttendanceComponent(
 
   if (
     action ===
-    "attendance_clear_all"
+    "attendance_clear_day"
   ) {
-    getAttendancePendingMap(
+    getDayPendingMap(
       session
     ).clear();
 
@@ -3578,7 +3945,7 @@ async function handleAttendanceComponent(
           session
         ),
         "",
-        "All pending attendance marks were cleared."
+        `Cleared all pending attendance for **${session.activeDay}**.`
       ].join("\n"),
       components:
         buildAttendanceBoardComponents(
@@ -3591,11 +3958,12 @@ async function handleAttendanceComponent(
 
   if (
     action ===
-    "attendance_change_day"
+    "attendance_change_days"
   ) {
-    session.day = null;
+    session.days = [];
+    session.activeDay = null;
     session.selectedStatus = null;
-    session.pending = new Map();
+    session.pendingByDay = new Map();
 
     await interaction.update({
       content: [
@@ -3603,8 +3971,8 @@ async function handleAttendanceComponent(
           session
         ),
         "",
-        "Choose a new attendance day.",
-        "Changing the day cleared all pending attendance marks."
+        "Choose the attendance days again.",
+        "Changing selected days cleared all pending attendance marks."
       ].join("\n"),
       components:
         buildAttendanceDayComponents(
@@ -3640,9 +4008,9 @@ async function handleAttendanceComponent(
     "attendance_review"
   ) {
     if (
-      getAttendancePendingMap(
+      getTotalPendingAttendanceEntries(
         session
-      ).size === 0
+      ) === 0
     ) {
       await interaction.reply({
         content:
@@ -3670,14 +4038,13 @@ async function handleAttendanceComponent(
 
   if (
     action ===
-    "attendance_submit"
+    "attendance_submit_all"
   ) {
-    const pending =
-      getAttendancePendingMap(
+    if (
+      getTotalPendingAttendanceEntries(
         session
-      );
-
-    if (pending.size === 0) {
+      ) === 0
+    ) {
       await interaction.reply({
         content:
           "There are no pending attendance changes to submit.",
@@ -3689,12 +4056,6 @@ async function handleAttendanceComponent(
     }
 
     await interaction.deferUpdate();
-
-    const attendanceColumn =
-      getAttendanceColumn(
-        session.company,
-        session.day
-      );
 
     const safeSheetName =
       escapeSheetName(
@@ -3712,31 +4073,46 @@ async function handleAttendanceComponent(
       );
 
     const data = [];
-    const submittedMembers = [];
+    const submitted = [];
 
-    for (
-      const [rowKey, status] of
-      pending.entries()
-    ) {
-      const member =
-        rosterByRow.get(rowKey);
+    for (const day of session.days) {
+      const attendanceColumn =
+        getAttendanceColumn(
+          session.company,
+          day
+        );
 
-      if (!member) {
-        continue;
+      const pending =
+        getDayPendingMap(
+          session,
+          day
+        );
+
+      for (
+        const [rowKey, status] of
+        pending.entries()
+      ) {
+        const member =
+          rosterByRow.get(rowKey);
+
+        if (!member) {
+          continue;
+        }
+
+        data.push({
+          range:
+            `${safeSheetName}!${attendanceColumn}${member.row}`,
+          values: [[status]]
+        });
+
+        submitted.push({
+          ...member,
+          day,
+          status,
+          cell:
+            `${attendanceColumn}${member.row}`
+        });
       }
-
-      data.push({
-        range:
-          `${safeSheetName}!${attendanceColumn}${member.row}`,
-        values: [[status]]
-      });
-
-      submittedMembers.push({
-        ...member,
-        status,
-        cell:
-          `${attendanceColumn}${member.row}`
-      });
     }
 
     if (data.length === 0) {
@@ -3761,30 +4137,56 @@ async function handleAttendanceComponent(
       }
     });
 
-    const counts =
-      getAttendanceCounts(
-        session
+    const summaryLines = [
+      "**Multi-Day Attendance Submitted**",
+      "",
+      `**Regiment:** ${session.regimentDisplayName}`,
+      `**Company:** ${session.company}`,
+      `**Days Submitted:** ${session.days.join(", ")}`,
+      `**Attendance Entries Updated:** ${submitted.length}`
+    ];
+
+    for (const day of session.days) {
+      const counts =
+        getAttendanceCountsForDay(
+          session,
+          day
+        );
+
+      const tracked =
+        (counts.get("PRES") || 0) +
+        (counts.get("EXC") || 0) +
+        (counts.get("AWOL") || 0);
+
+      const rate =
+        tracked > 0
+          ? (counts.get("PRES") || 0) /
+            tracked
+          : null;
+
+      summaryLines.push(
+        "",
+        `**${day}**`,
+        `Present: ${counts.get("PRES") || 0} | ` +
+        `Excused: ${counts.get("EXC") || 0} | ` +
+        `AWOL: ${counts.get("AWOL") || 0} | ` +
+        `Attendance Rate: ${rate === null ? "N/A" : `${(rate * 100).toFixed(0)}%`}`
       );
+    }
 
-    const tracked =
-      (counts.get("PRES") || 0) +
-      (counts.get("EXC") || 0) +
-      (counts.get("AWOL") || 0);
-
-    const rate =
-      tracked > 0
-        ? (counts.get("PRES") || 0) /
-          tracked
-        : null;
+    summaryLines.push(
+      "",
+      `Recorded by <@${interaction.user.id}>`
+    );
 
     await sendOrbatLog({
       interaction,
       category: "Attendance",
       action:
-        "Company Attendance Submitted",
+        "Multi-Day Company Attendance Submitted",
       affectedMember: null,
       robloxUsername:
-        `${submittedMembers.length} member(s)`,
+        `${submitted.length} attendance entry/entries`,
       changes: [
         {
           label: "Regiment",
@@ -3797,96 +4199,33 @@ async function handleAttendanceComponent(
             session.company
         },
         {
-          label: "Day",
+          label: "Days",
           after:
-            session.day
+            session.days.join(", ")
         },
         {
-          label: "Members Updated",
+          label: "Entries Updated",
           after:
             String(
-              submittedMembers.length
-            )
-        },
-        {
-          label: "Present",
-          after:
-            String(
-              counts.get("PRES") || 0
-            )
-        },
-        {
-          label: "Excused",
-          after:
-            String(
-              counts.get("EXC") || 0
-            )
-        },
-        {
-          label: "AWOL",
-          after:
-            String(
-              counts.get("AWOL") || 0
+              submitted.length
             )
         }
       ],
       notes:
-        submittedMembers
+        submitted
           .slice(0, 20)
           .map(
             member =>
-              `${member.robloxUsername} -> ${member.status} (${member.cell})`
+              `${member.day}: ${member.robloxUsername} -> ${member.status} (${member.cell})`
           )
           .join("\n")
     });
 
     attendanceSessions.delete(token);
 
-    const responseLines = [
-      "**Attendance Submitted**",
-      "",
-      `**Regiment:** ${session.regimentDisplayName}`,
-      `**Company:** ${session.company}`,
-      `**Day:** ${session.day}`,
-      `**Members Updated:** ${submittedMembers.length}`,
-      "",
-      `**Present:** ${counts.get("PRES") || 0}`,
-      `**Excused:** ${counts.get("EXC") || 0}`,
-      `**AWOL:** ${counts.get("AWOL") || 0}`,
-      rate === null
-        ? "**Attendance Rate:** N/A"
-        : `**Attendance Rate:** ${(rate * 100).toFixed(0)}%`,
-      "",
-      `Recorded by <@${interaction.user.id}>`
-    ];
-
-    const extraStatuses =
-      ATTENDANCE_STATUS_CHOICES
-        .filter(status =>
-          !["PRES", "EXC", "AWOL"].includes(
-            status
-          )
-        )
-        .filter(status =>
-          (counts.get(status) || 0) > 0
-        );
-
-    if (extraStatuses.length > 0) {
-      responseLines.push("");
-
-      for (
-        const status of
-        extraStatuses
-      ) {
-        responseLines.push(
-          `**${getAttendanceStatusLabel(status)}:** ${counts.get(status)}`
-        );
-      }
-    }
-
     await interaction.editReply({
       content:
-        responseLines.join("\n"),
+        summaryLines.join("\n"),
       components: []
     });
 
