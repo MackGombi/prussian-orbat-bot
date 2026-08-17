@@ -2631,25 +2631,49 @@ async function handleAttendanceDayAutocomplete(
 
 /*
 |--------------------------------------------------------------------------
-| Multi-member attendance sessions
+| Interactive attendance board
 |--------------------------------------------------------------------------
 |
-| /attendance now works as:
-| 1. Regiment
-| 2. Company
-| 3. Day
-| 4. Select up to 15 Discord members total
-| 5. Choose one attendance status for the whole selected group
+| /attendance flow:
+| 1. Regiment + company
+| 2. Choose attendance day
+| 3. Bot loads the actual ORBAT company roster
+| 4. Choose an attendance status
+| 5. Select roster members for that status
+| 6. Repeat until complete
+| 7. Optionally mark every unmarked member AWOL
+| 8. Review
+| 9. Submit all changes to Google Sheets in one batch
 |--------------------------------------------------------------------------
 */
 
 const ATTENDANCE_SESSION_TTL_MS =
-  10 * 60 * 1000;
-
-const ATTENDANCE_MAX_MEMBERS = 15;
+  15 * 60 * 1000;
 
 const attendanceSessions =
   new Map();
+
+const ATTENDANCE_STATUS_META = new Map([
+  ["PRES", { label: "Present" }],
+  ["EXC", { label: "Excused" }],
+  ["AWOL", { label: "AWOL" }],
+  ["RSVP", { label: "RSVP" }],
+  ["MAYB", { label: "Maybe" }],
+  ["NO", { label: "No" }],
+  ["DM", { label: "DM" }],
+  ["LEFT", { label: "Left" }]
+]);
+
+function getAttendanceStatusLabel(status) {
+  const meta =
+    ATTENDANCE_STATUS_META.get(
+      String(status || "").trim()
+    );
+
+  return meta
+    ? meta.label
+    : String(status || "Unmarked");
+}
 
 function createAttendanceSessionToken(
   interaction
@@ -2701,17 +2725,190 @@ function getAttendanceSession(
 function scheduleAttendanceSessionExpiry(
   token
 ) {
+  const session =
+    attendanceSessions.get(token);
+
+  if (!session) {
+    return;
+  }
+
+  const delay =
+    Math.max(
+      1000,
+      session.expiresAt - Date.now() + 1000
+    );
+
   setTimeout(() => {
-    const session =
+    const current =
       attendanceSessions.get(token);
 
+    if (!current) {
+      return;
+    }
+
     if (
-      session &&
-      session.expiresAt <= Date.now()
+      current.expiresAt <= Date.now()
     ) {
       attendanceSessions.delete(token);
+      return;
     }
-  }, ATTENDANCE_SESSION_TTL_MS + 1000);
+
+    scheduleAttendanceSessionExpiry(token);
+  }, delay);
+}
+
+async function ensureAttendanceRoster(
+  session
+) {
+  if (
+    Array.isArray(session.roster) &&
+    session.roster.length > 0
+  ) {
+    return session.roster;
+  }
+
+  const summary =
+    await getCompanyRosterSummary({
+      spreadsheetId:
+        session.spreadsheetId,
+      sheetName:
+        session.company
+    });
+
+  session.roster =
+    summary.members
+      .filter(member =>
+        member.robloxUsername ||
+        member.discordId ||
+        member.rank
+      )
+      .map(member => ({
+        row: member.row,
+        robloxUsername:
+          member.robloxUsername ||
+          `Row ${member.row}`,
+        discordId:
+          member.discordId || "",
+        rank:
+          member.rank || "No rank"
+      }));
+
+  return session.roster;
+}
+
+function getAttendancePendingMap(
+  session
+) {
+  if (!(session.pending instanceof Map)) {
+    session.pending = new Map();
+  }
+
+  return session.pending;
+}
+
+function getAttendanceCounts(
+  session
+) {
+  const pending =
+    getAttendancePendingMap(session);
+
+  const counts = new Map();
+
+  for (
+    const status of
+    ATTENDANCE_STATUS_CHOICES
+  ) {
+    counts.set(status, 0);
+  }
+
+  for (const status of pending.values()) {
+    counts.set(
+      status,
+      (counts.get(status) || 0) + 1
+    );
+  }
+
+  return counts;
+}
+
+function attendanceSessionHeader(
+  session
+) {
+  const rosterCount =
+    Array.isArray(session.roster)
+      ? session.roster.length
+      : 0;
+
+  return [
+    "**Company Attendance Board**",
+    "",
+    `**Regiment:** ${session.regimentDisplayName}`,
+    `**Company:** ${session.company}`,
+    session.day
+      ? `**Day:** ${session.day}`
+      : "**Day:** Not selected",
+    rosterCount > 0
+      ? `**Company Strength:** ${rosterCount}`
+      : null
+  ].filter(Boolean);
+}
+
+function attendanceBoardLines(
+  session
+) {
+  const pending =
+    getAttendancePendingMap(session);
+
+  const counts =
+    getAttendanceCounts(session);
+
+  const rosterCount =
+    Array.isArray(session.roster)
+      ? session.roster.length
+      : 0;
+
+  const unmarked =
+    Math.max(
+      0,
+      rosterCount - pending.size
+    );
+
+  const lines = [
+    ...attendanceSessionHeader(session),
+    "",
+    `**Unmarked:** ${unmarked}`,
+    `**Present:** ${counts.get("PRES") || 0}`,
+    `**Excused:** ${counts.get("EXC") || 0}`,
+    `**AWOL:** ${counts.get("AWOL") || 0}`
+  ];
+
+  const otherStatuses =
+    ATTENDANCE_STATUS_CHOICES
+      .filter(status =>
+        !["PRES", "EXC", "AWOL"].includes(
+          status
+        )
+      )
+      .filter(status =>
+        (counts.get(status) || 0) > 0
+      )
+      .map(
+        status =>
+          `**${getAttendanceStatusLabel(status)}:** ` +
+          `${counts.get(status)}`
+      );
+
+  if (otherStatuses.length > 0) {
+    lines.push(...otherStatuses);
+  }
+
+  lines.push(
+    "",
+    "Choose a status below, then select the members who should receive it.",
+    "Nothing is written to Google Sheets until **Submit Attendance**."
+  );
+
+  return lines;
 }
 
 function buildAttendanceDayComponents(
@@ -2757,116 +2954,76 @@ function buildAttendanceDayComponents(
   ];
 }
 
-function buildAttendanceMemberComponents(
+function buildAttendanceBoardComponents(
   session
 ) {
-  const remaining =
-    Math.max(
-      0,
-      ATTENDANCE_MAX_MEMBERS -
-      session.userIds.size
-    );
+  const statusOptions =
+    ATTENDANCE_STATUS_CHOICES
+      .map(status => {
+        const meta =
+          ATTENDANCE_STATUS_META.get(status);
 
-  const rows = [];
+        return {
+          label:
+            meta?.label || status,
+          value: status,
+          description:
+            `Mark selected members as ${status}`
+        };
+      });
 
-  if (remaining > 0) {
-    const userMenu =
-      new UserSelectMenuBuilder()
-        .setCustomId(
-          `attendance_users:${session.token}`
-        )
-        .setPlaceholder(
-          `Select members (${remaining} remaining)`
-        )
-        .setMinValues(1)
-        .setMaxValues(
-          Math.min(
-            ATTENDANCE_MAX_MEMBERS,
-            remaining
-          )
-        );
+  statusOptions.push({
+    label: "Unmark / Clear",
+    value: "__UNMARK__",
+    description:
+      "Remove pending attendance from selected members"
+  });
 
-    rows.push(
-      new ActionRowBuilder()
-        .addComponents(userMenu)
-    );
-  }
-
-  const continueButton =
-    new ButtonBuilder()
-      .setCustomId(
-        `attendance_continue:${session.token}`
-      )
-      .setLabel(
-        `Continue (${session.userIds.size})`
-      )
-      .setStyle(ButtonStyle.Success)
-      .setDisabled(
-        session.userIds.size === 0
-      );
-
-  const clearButton =
-    new ButtonBuilder()
-      .setCustomId(
-        `attendance_clear:${session.token}`
-      )
-      .setLabel("Clear Members")
-      .setStyle(ButtonStyle.Secondary)
-      .setDisabled(
-        session.userIds.size === 0
-      );
-
-  const cancelButton =
-    new ButtonBuilder()
-      .setCustomId(
-        `attendance_cancel:${session.token}`
-      )
-      .setLabel("Cancel")
-      .setStyle(ButtonStyle.Danger);
-
-  rows.push(
-    new ActionRowBuilder()
-      .addComponents(
-        continueButton,
-        clearButton,
-        cancelButton
-      )
-  );
-
-  return rows;
-}
-
-function buildAttendanceStatusComponents(
-  session
-) {
   const statusMenu =
     new StringSelectMenuBuilder()
       .setCustomId(
-        `attendance_status:${session.token}`
+        `attendance_pick_status:${session.token}`
       )
       .setPlaceholder(
-        "Choose attendance for all selected members"
+        "Choose a status to assign"
       )
       .setMinValues(1)
       .setMaxValues(1)
-      .addOptions(
-        ATTENDANCE_STATUS_CHOICES.map(
-          status => ({
-            label: status,
-            value: status
-          })
-        )
-      );
+      .addOptions(statusOptions);
 
-  const backButton =
+  const remainingAwol =
     new ButtonBuilder()
       .setCustomId(
-        `attendance_back:${session.token}`
+        `attendance_remaining_awol:${session.token}`
       )
-      .setLabel("Back to Members")
+      .setLabel("Remaining -> AWOL")
+      .setStyle(ButtonStyle.Danger);
+
+  const review =
+    new ButtonBuilder()
+      .setCustomId(
+        `attendance_review:${session.token}`
+      )
+      .setLabel("Review Attendance")
+      .setStyle(ButtonStyle.Success);
+
+  const changeDay =
+    new ButtonBuilder()
+      .setCustomId(
+        `attendance_change_day:${session.token}`
+      )
+      .setLabel("Change Day")
       .setStyle(ButtonStyle.Secondary);
 
-  const cancelButton =
+  const clearAll =
+    new ButtonBuilder()
+      .setCustomId(
+        `attendance_clear_all:${session.token}`
+      )
+      .setLabel("Clear All")
+      .setStyle(ButtonStyle.Secondary);
+
+  const cancel =
     new ButtonBuilder()
       .setCustomId(
         `attendance_cancel:${session.token}`
@@ -2879,24 +3036,238 @@ function buildAttendanceStatusComponents(
       .addComponents(statusMenu),
     new ActionRowBuilder()
       .addComponents(
-        backButton,
-        cancelButton
+        remainingAwol,
+        review,
+        changeDay,
+        clearAll,
+        cancel
       )
   ];
 }
 
-function attendanceSessionHeader(
+function buildAttendanceRosterComponents(
   session
 ) {
-  return [
-    "**Attendance Entry**",
+  const roster =
+    Array.isArray(session.roster)
+      ? session.roster
+      : [];
+
+  const pending =
+    getAttendancePendingMap(session);
+
+  const options =
+    roster
+      .slice(0, 25)
+      .map(member => {
+        const current =
+          pending.get(
+            String(member.row)
+          );
+
+        const descriptionParts = [
+          member.rank
+        ];
+
+        if (current) {
+          descriptionParts.push(
+            `Pending: ${getAttendanceStatusLabel(current)}`
+          );
+        } else {
+          descriptionParts.push(
+            "Pending: Unmarked"
+          );
+        }
+
+        return {
+          label:
+            String(
+              member.robloxUsername ||
+              `Row ${member.row}`
+            ).slice(0, 100),
+          value:
+            String(member.row),
+          description:
+            descriptionParts
+              .join(" - ")
+              .slice(0, 100)
+        };
+      });
+
+  const rows = [];
+
+  if (options.length > 0) {
+    const memberMenu =
+      new StringSelectMenuBuilder()
+        .setCustomId(
+          `attendance_roster:${session.token}`
+        )
+        .setPlaceholder(
+          session.selectedStatus ===
+            "__UNMARK__"
+            ? "Select members to unmark"
+            : `Select members for ${getAttendanceStatusLabel(session.selectedStatus)}`
+        )
+        .setMinValues(1)
+        .setMaxValues(
+          Math.min(
+            25,
+            options.length
+          )
+        )
+        .addOptions(options);
+
+    rows.push(
+      new ActionRowBuilder()
+        .addComponents(memberMenu)
+    );
+  }
+
+  const back =
+    new ButtonBuilder()
+      .setCustomId(
+        `attendance_back_board:${session.token}`
+      )
+      .setLabel("Back to Board")
+      .setStyle(ButtonStyle.Secondary);
+
+  const cancel =
+    new ButtonBuilder()
+      .setCustomId(
+        `attendance_cancel:${session.token}`
+      )
+      .setLabel("Cancel")
+      .setStyle(ButtonStyle.Danger);
+
+  rows.push(
+    new ActionRowBuilder()
+      .addComponents(
+        back,
+        cancel
+      )
+  );
+
+  return rows;
+}
+
+function attendanceReviewLines(
+  session
+) {
+  const pending =
+    getAttendancePendingMap(session);
+
+  const roster =
+    Array.isArray(session.roster)
+      ? session.roster
+      : [];
+
+  const byStatus =
+    new Map();
+
+  for (
+    const status of
+    ATTENDANCE_STATUS_CHOICES
+  ) {
+    byStatus.set(status, []);
+  }
+
+  for (const member of roster) {
+    const status =
+      pending.get(String(member.row));
+
+    if (!status) {
+      continue;
+    }
+
+    if (!byStatus.has(status)) {
+      byStatus.set(status, []);
+    }
+
+    byStatus.get(status).push(member);
+  }
+
+  const lines = [
+    "**Review Attendance**",
     "",
     `**Regiment:** ${session.regimentDisplayName}`,
     `**Company:** ${session.company}`,
-    session.day
-      ? `**Day:** ${session.day}`
-      : "**Day:** Not selected",
-    `**Members Selected:** ${session.userIds.size}`
+    `**Day:** ${session.day}`,
+    `**Pending Changes:** ${pending.size}`,
+    `**Unmarked:** ${Math.max(0, roster.length - pending.size)}`
+  ];
+
+  for (
+    const status of
+    ATTENDANCE_STATUS_CHOICES
+  ) {
+    const members =
+      byStatus.get(status) || [];
+
+    if (members.length === 0) {
+      continue;
+    }
+
+    lines.push(
+      "",
+      `**${getAttendanceStatusLabel(status)} (${members.length})**`
+    );
+
+    for (const member of members) {
+      lines.push(
+        member.discordId
+          ? `- <@${member.discordId}> - ${member.robloxUsername}`
+          : `- ${member.robloxUsername}`
+      );
+    }
+  }
+
+  lines.push(
+    "",
+    "Press **Submit Attendance** to write these changes to Google Sheets."
+  );
+
+  return lines;
+}
+
+function buildAttendanceReviewComponents(
+  session
+) {
+  const submit =
+    new ButtonBuilder()
+      .setCustomId(
+        `attendance_submit:${session.token}`
+      )
+      .setLabel("Submit Attendance")
+      .setStyle(ButtonStyle.Success)
+      .setDisabled(
+        getAttendancePendingMap(
+          session
+        ).size === 0
+      );
+
+  const back =
+    new ButtonBuilder()
+      .setCustomId(
+        `attendance_back_board:${session.token}`
+      )
+      .setLabel("Back to Board")
+      .setStyle(ButtonStyle.Secondary);
+
+  const cancel =
+    new ButtonBuilder()
+      .setCustomId(
+        `attendance_cancel:${session.token}`
+      )
+      .setLabel("Cancel")
+      .setStyle(ButtonStyle.Danger);
+
+  return [
+    new ActionRowBuilder()
+      .addComponents(
+        submit,
+        back,
+        cancel
+      )
   ];
 }
 
@@ -2960,7 +3331,7 @@ async function handleAttendanceComponent(
 
     await interaction.update({
       content:
-        "Attendance entry cancelled.",
+        "Attendance entry cancelled. No spreadsheet changes were made.",
       components: []
     });
 
@@ -2989,163 +3360,52 @@ async function handleAttendanceComponent(
         flags:
           MessageFlags.Ephemeral
       });
+
       return true;
     }
 
     session.day = day;
+    session.selectedStatus = null;
+    session.pending = new Map();
 
-    await interaction.update({
-      content: [
-        ...attendanceSessionHeader(
-          session
-        ),
-        "",
-        `Select up to **${ATTENDANCE_MAX_MEMBERS}** members total.`,
-        "You may use the selector again until the 15-member limit is reached.",
-        "When everyone is selected, click **Continue**."
-      ].join("\n"),
-      components:
-        buildAttendanceMemberComponents(
-          session
-        )
-    });
+    await ensureAttendanceRoster(
+      session
+    );
 
-    return true;
-  }
-
-  if (
-    action ===
-    "attendance_users"
-  ) {
-    const beforeCount =
-      session.userIds.size;
-
-    for (
-      const userId of
-      interaction.values || []
-    ) {
-      if (
-        session.userIds.size >=
-        ATTENDANCE_MAX_MEMBERS
-      ) {
-        break;
-      }
-
-      session.userIds.add(userId);
-    }
-
-    const addedCount =
-      session.userIds.size -
-      beforeCount;
-
-    const atLimit =
-      session.userIds.size >=
-      ATTENDANCE_MAX_MEMBERS;
-
-    await interaction.update({
-      content: [
-        ...attendanceSessionHeader(
-          session
-        ),
-        "",
-        `Added **${addedCount}** member(s). **${session.userIds.size}/${ATTENDANCE_MAX_MEMBERS}** selected.`,
-        atLimit
-          ? "The 15-member limit has been reached. Click **Continue** to choose attendance."
-          : "Select more members or click **Continue**."
-      ].join("\n"),
-      components:
-        buildAttendanceMemberComponents(
-          session
-        )
-    });
-
-    return true;
-  }
-
-  if (
-    action ===
-    "attendance_clear"
-  ) {
-    session.userIds.clear();
-
-    await interaction.update({
-      content: [
-        ...attendanceSessionHeader(
-          session
-        ),
-        "",
-        "The member selection was cleared.",
-        "Select members again."
-      ].join("\n"),
-      components:
-        buildAttendanceMemberComponents(
-          session
-        )
-    });
-
-    return true;
-  }
-
-  if (
-    action ===
-    "attendance_back"
-  ) {
-    await interaction.update({
-      content: [
-        ...attendanceSessionHeader(
-          session
-        ),
-        "",
-        "Add more members or continue when ready."
-      ].join("\n"),
-      components:
-        buildAttendanceMemberComponents(
-          session
-        )
-    });
-
-    return true;
-  }
-
-  if (
-    action ===
-    "attendance_continue"
-  ) {
-    if (
-      session.userIds.size === 0
-    ) {
-      await interaction.reply({
-        content:
-          "Select at least one member before continuing.",
-        flags:
-          MessageFlags.Ephemeral
+    if (session.roster.length === 0) {
+      await interaction.update({
+        content: [
+          ...attendanceSessionHeader(
+            session
+          ),
+          "",
+          "No members were found in this company roster."
+        ].join("\n"),
+        components: [
+          new ActionRowBuilder()
+            .addComponents(
+              new ButtonBuilder()
+                .setCustomId(
+                  `attendance_cancel:${session.token}`
+                )
+                .setLabel("Close")
+                .setStyle(
+                  ButtonStyle.Secondary
+                )
+            )
+        ]
       });
-      return true;
-    }
 
-    if (
-      session.userIds.size >
-      ATTENDANCE_MAX_MEMBERS
-    ) {
-      await interaction.reply({
-        content:
-          `Attendance is limited to ${ATTENDANCE_MAX_MEMBERS} members at a time.`,
-        flags:
-          MessageFlags.Ephemeral
-      });
       return true;
     }
 
     await interaction.update({
-      content: [
-        ...attendanceSessionHeader(
+      content:
+        attendanceBoardLines(
           session
-        ),
-        "",
-        "Choose the attendance status that should be applied to **all selected members**."
-      ].join("\n"),
+        ).join("\n"),
       components:
-        buildAttendanceStatusComponents(
+        buildAttendanceBoardComponents(
           session
         )
     });
@@ -3155,18 +3415,17 @@ async function handleAttendanceComponent(
 
   if (
     action ===
-    "attendance_status"
+    "attendance_pick_status"
   ) {
-    const attendance =
+    const status =
       String(
         interaction.values?.[0] || ""
       ).trim();
 
     if (
-      !ATTENDANCE_STATUS_CHOICES.some(
-        value =>
-          normalizeText(value) ===
-          normalizeText(attendance)
+      status !== "__UNMARK__" &&
+      !ATTENDANCE_STATUS_CHOICES.includes(
+        status
       )
     ) {
       await interaction.reply({
@@ -3175,98 +3434,357 @@ async function handleAttendanceComponent(
         flags:
           MessageFlags.Ephemeral
       });
+
+      return true;
+    }
+
+    session.selectedStatus =
+      status;
+
+    await ensureAttendanceRoster(
+      session
+    );
+
+    await interaction.update({
+      content: [
+        ...attendanceSessionHeader(
+          session
+        ),
+        "",
+        status === "__UNMARK__"
+          ? "Select the roster members whose pending attendance should be cleared."
+          : `Select the roster members to mark as **${getAttendanceStatusLabel(status)}**.`
+      ].join("\n"),
+      components:
+        buildAttendanceRosterComponents(
+          session
+        )
+    });
+
+    return true;
+  }
+
+  if (
+    action ===
+    "attendance_roster"
+  ) {
+    const selectedRows =
+      interaction.values || [];
+
+    const pending =
+      getAttendancePendingMap(
+        session
+      );
+
+    let changed = 0;
+
+    for (const row of selectedRows) {
+      const key =
+        String(row);
+
+      if (
+        session.selectedStatus ===
+        "__UNMARK__"
+      ) {
+        if (pending.delete(key)) {
+          changed += 1;
+        }
+      } else {
+        pending.set(
+          key,
+          session.selectedStatus
+        );
+        changed += 1;
+      }
+    }
+
+    session.selectedStatus = null;
+
+    await interaction.update({
+      content: [
+        ...attendanceBoardLines(
+          session
+        ),
+        "",
+        `Updated **${changed}** member(s) on the pending attendance board.`
+      ].join("\n"),
+      components:
+        buildAttendanceBoardComponents(
+          session
+        )
+    });
+
+    return true;
+  }
+
+  if (
+    action ===
+    "attendance_remaining_awol"
+  ) {
+    await ensureAttendanceRoster(
+      session
+    );
+
+    const pending =
+      getAttendancePendingMap(
+        session
+      );
+
+    let added = 0;
+
+    for (const member of session.roster) {
+      const key =
+        String(member.row);
+
+      if (!pending.has(key)) {
+        pending.set(
+          key,
+          "AWOL"
+        );
+        added += 1;
+      }
+    }
+
+    await interaction.update({
+      content: [
+        ...attendanceBoardLines(
+          session
+        ),
+        "",
+        `Marked **${added}** previously unmarked member(s) as **AWOL**.`
+      ].join("\n"),
+      components:
+        buildAttendanceBoardComponents(
+          session
+        )
+    });
+
+    return true;
+  }
+
+  if (
+    action ===
+    "attendance_clear_all"
+  ) {
+    getAttendancePendingMap(
+      session
+    ).clear();
+
+    session.selectedStatus = null;
+
+    await interaction.update({
+      content: [
+        ...attendanceBoardLines(
+          session
+        ),
+        "",
+        "All pending attendance marks were cleared."
+      ].join("\n"),
+      components:
+        buildAttendanceBoardComponents(
+          session
+        )
+    });
+
+    return true;
+  }
+
+  if (
+    action ===
+    "attendance_change_day"
+  ) {
+    session.day = null;
+    session.selectedStatus = null;
+    session.pending = new Map();
+
+    await interaction.update({
+      content: [
+        ...attendanceSessionHeader(
+          session
+        ),
+        "",
+        "Choose a new attendance day.",
+        "Changing the day cleared all pending attendance marks."
+      ].join("\n"),
+      components:
+        buildAttendanceDayComponents(
+          session
+        )
+    });
+
+    return true;
+  }
+
+  if (
+    action ===
+    "attendance_back_board"
+  ) {
+    session.selectedStatus = null;
+
+    await interaction.update({
+      content:
+        attendanceBoardLines(
+          session
+        ).join("\n"),
+      components:
+        buildAttendanceBoardComponents(
+          session
+        )
+    });
+
+    return true;
+  }
+
+  if (
+    action ===
+    "attendance_review"
+  ) {
+    if (
+      getAttendancePendingMap(
+        session
+      ).size === 0
+    ) {
+      await interaction.reply({
+        content:
+          "No attendance has been marked yet.",
+        flags:
+          MessageFlags.Ephemeral
+      });
+
+      return true;
+    }
+
+    await interaction.update({
+      content:
+        attendanceReviewLines(
+          session
+        ).join("\n"),
+      components:
+        buildAttendanceReviewComponents(
+          session
+        )
+    });
+
+    return true;
+  }
+
+  if (
+    action ===
+    "attendance_submit"
+  ) {
+    const pending =
+      getAttendancePendingMap(
+        session
+      );
+
+    if (pending.size === 0) {
+      await interaction.reply({
+        content:
+          "There are no pending attendance changes to submit.",
+        flags:
+          MessageFlags.Ephemeral
+      });
+
       return true;
     }
 
     await interaction.deferUpdate();
 
-    const updated = [];
-    const skipped = [];
-    const previousValues = [];
+    const attendanceColumn =
+      getAttendanceColumn(
+        session.company,
+        session.day
+      );
+
+    const safeSheetName =
+      escapeSheetName(
+        session.company
+      );
+
+    const rosterByRow =
+      new Map(
+        session.roster.map(
+          member => [
+            String(member.row),
+            member
+          ]
+        )
+      );
+
+    const data = [];
+    const submittedMembers = [];
 
     for (
-      const userId of
-      session.userIds
+      const [rowKey, status] of
+      pending.entries()
     ) {
-      try {
-        const row =
-          await findMemberRowInCompanyByDiscordId({
-            spreadsheetId:
-              session.spreadsheetId,
-            sheetName:
-              session.company,
-            discordId:
-              userId
-          });
+      const member =
+        rosterByRow.get(rowKey);
 
-        if (!row) {
-          skipped.push({
-            userId,
-            reason:
-              "not assigned to the selected company"
-          });
-          continue;
-        }
-
-        const memberRecord =
-          await getMemberRecord({
-            spreadsheetId:
-              session.spreadsheetId,
-            sheetName:
-              session.company,
-            row
-          });
-
-        const attendanceResult =
-          await setAttendanceMarker({
-            spreadsheetId:
-              session.spreadsheetId,
-            sheetName:
-              session.company,
-            row,
-            day:
-              session.day,
-            attendance
-          });
-
-        updated.push({
-          userId,
-          row,
-          robloxUsername:
-            memberRecord.robloxUsername,
-          cell:
-            attendanceResult.range
-        });
-
-        previousValues.push(
-          attendanceResult.previousValue ||
-          "Blank"
-        );
-      } catch (error) {
-        console.error(
-          `Attendance update failed for Discord user ${userId}:`
-        );
-        console.error(error);
-
-        skipped.push({
-          userId,
-          reason:
-            error?.message ||
-            "unknown spreadsheet error"
-        });
+      if (!member) {
+        continue;
       }
+
+      data.push({
+        range:
+          `${safeSheetName}!${attendanceColumn}${member.row}`,
+        values: [[status]]
+      });
+
+      submittedMembers.push({
+        ...member,
+        status,
+        cell:
+          `${attendanceColumn}${member.row}`
+      });
     }
 
-    attendanceSessions.delete(token);
+    if (data.length === 0) {
+      attendanceSessions.delete(token);
+
+      await interaction.editReply({
+        content:
+          "No valid roster attendance changes were available to submit.",
+        components: []
+      });
+
+      return true;
+    }
+
+    await sheets.spreadsheets.values.batchUpdate({
+      spreadsheetId:
+        session.spreadsheetId,
+      requestBody: {
+        valueInputOption:
+          "USER_ENTERED",
+        data
+      }
+    });
+
+    const counts =
+      getAttendanceCounts(
+        session
+      );
+
+    const tracked =
+      (counts.get("PRES") || 0) +
+      (counts.get("EXC") || 0) +
+      (counts.get("AWOL") || 0);
+
+    const rate =
+      tracked > 0
+        ? (counts.get("PRES") || 0) /
+          tracked
+        : null;
 
     await sendOrbatLog({
       interaction,
       category: "Attendance",
       action:
-        "Bulk Attendance Updated",
+        "Company Attendance Submitted",
       affectedMember: null,
       robloxUsername:
-        `${updated.length} member(s)`,
+        `${submittedMembers.length} member(s)`,
       changes: [
         {
           label: "Regiment",
@@ -3284,96 +3802,86 @@ async function handleAttendanceComponent(
             session.day
         },
         {
-          label: "Attendance",
-          after:
-            attendance
-        },
-        {
           label: "Members Updated",
           after:
-            String(updated.length)
+            String(
+              submittedMembers.length
+            )
         },
         {
-          label: "Members Skipped",
+          label: "Present",
           after:
-            String(skipped.length)
+            String(
+              counts.get("PRES") || 0
+            )
+        },
+        {
+          label: "Excused",
+          after:
+            String(
+              counts.get("EXC") || 0
+            )
+        },
+        {
+          label: "AWOL",
+          after:
+            String(
+              counts.get("AWOL") || 0
+            )
         }
       ],
       notes:
-        updated.length > 0
-          ? updated
-              .slice(0, 20)
-              .map(
-                member =>
-                  `<@${member.userId}> → ${member.cell}`
-              )
-              .join("\n")
-          : "No members were updated."
+        submittedMembers
+          .slice(0, 20)
+          .map(
+            member =>
+              `${member.robloxUsername} -> ${member.status} (${member.cell})`
+          )
+          .join("\n")
     });
 
-    const updatedPreview =
-      updated
-        .slice(0, 20)
-        .map(
-          member =>
-            `• <@${member.userId}> — ${member.cell}`
-        );
-
-    const skippedPreview =
-      skipped
-        .slice(0, 15)
-        .map(
-          member =>
-            `• <@${member.userId}> — ${member.reason}`
-        );
+    attendanceSessions.delete(token);
 
     const responseLines = [
-      "**Attendance Updated**",
+      "**Attendance Submitted**",
       "",
       `**Regiment:** ${session.regimentDisplayName}`,
       `**Company:** ${session.company}`,
       `**Day:** ${session.day}`,
-      `**Attendance:** ${attendance}`,
-      `**Members Updated:** ${updated.length}`,
-      `**Members Skipped:** ${skipped.length}`
+      `**Members Updated:** ${submittedMembers.length}`,
+      "",
+      `**Present:** ${counts.get("PRES") || 0}`,
+      `**Excused:** ${counts.get("EXC") || 0}`,
+      `**AWOL:** ${counts.get("AWOL") || 0}`,
+      rate === null
+        ? "**Attendance Rate:** N/A"
+        : `**Attendance Rate:** ${(rate * 100).toFixed(0)}%`,
+      "",
+      `Recorded by <@${interaction.user.id}>`
     ];
 
-    if (
-      updatedPreview.length > 0
-    ) {
-      responseLines.push(
-        "",
-        "**Updated:**",
-        ...updatedPreview
-      );
-    }
+    const extraStatuses =
+      ATTENDANCE_STATUS_CHOICES
+        .filter(status =>
+          !["PRES", "EXC", "AWOL"].includes(
+            status
+          )
+        )
+        .filter(status =>
+          (counts.get(status) || 0) > 0
+        );
 
-    if (
-      updated.length >
-      updatedPreview.length
-    ) {
-      responseLines.push(
-        `• …and ${updated.length - updatedPreview.length} more`
-      );
-    }
+    if (extraStatuses.length > 0) {
+      responseLines.push("");
 
-    if (
-      skippedPreview.length > 0
-    ) {
-      responseLines.push(
-        "",
-        "**Skipped:**",
-        ...skippedPreview
-      );
-    }
-
-    if (
-      skipped.length >
-      skippedPreview.length
-    ) {
-      responseLines.push(
-        `• …and ${skipped.length - skippedPreview.length} more`
-      );
+      for (
+        const status of
+        extraStatuses
+      ) {
+        responseLines.push(
+          `**${getAttendanceStatusLabel(status)}:** ${counts.get(status)}`
+        );
+      }
     }
 
     await interaction.editReply({
@@ -3387,6 +3895,7 @@ async function handleAttendanceComponent(
 
   return false;
 }
+
 
 /*
 |--------------------------------------------------------------------------
