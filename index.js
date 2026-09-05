@@ -514,6 +514,19 @@ function isSchuetzenRegiment(
   );
 }
 
+function usesSchuetzenPositionStructure(
+  regimentOrSpreadsheetId,
+  sheetName
+) {
+  return (
+    isSchuetzenRegiment(
+      regimentOrSpreadsheetId
+    ) &&
+    !isGarnisonCompany(sheetName) &&
+    !isGeneralstabOrCommandSheet(sheetName)
+  );
+}
+
 function resolveSchuetzenPosition(
   positionValue
 ) {
@@ -612,8 +625,9 @@ function getLastMemberRowForSpreadsheet(
   sheetName
 ) {
   if (
-    isSchuetzenRegiment(
-      spreadsheetId
+    usesSchuetzenPositionStructure(
+      spreadsheetId,
+      sheetName
     )
   ) {
     return 26;
@@ -1676,8 +1690,9 @@ async function sortCompanyByRank({
   }
 
   if (
-    isSchuetzenRegiment(
-      spreadsheetId
+    usesSchuetzenPositionStructure(
+      spreadsheetId,
+      sheetName
     )
   ) {
     if (platoon) {
@@ -2326,6 +2341,46 @@ async function removeMemberFromSheet({
   );
 }
 
+async function writeGarnisonInactivity({
+  spreadsheetId,
+  sheetName,
+  row,
+  duration,
+  reason
+}) {
+  if (!isGarnisonCompany(sheetName)) {
+    throw new Error(
+      "GARNISON_INACTIVITY_WRONG_SHEET"
+    );
+  }
+
+  const safeSheetName =
+    escapeSheetName(sheetName);
+
+  /*
+   * Garnison merged fields:
+   * I:L = Duration of Inactivity -> write to I, the top-left anchor.
+   * M:N = Reason for Inactivity -> write to M, the top-left anchor.
+   */
+  await sheets.spreadsheets.values.batchUpdate({
+    spreadsheetId,
+    requestBody: {
+      valueInputOption: "USER_ENTERED",
+      data: [
+        {
+          range: `${safeSheetName}!I${row}`,
+          values: [[duration]]
+        },
+        {
+          range: `${safeSheetName}!M${row}`,
+          values: [[reason]]
+        }
+      ]
+    }
+  });
+}
+
+
 async function updateMemberRank({
   spreadsheetId,
   sheetName,
@@ -2355,8 +2410,9 @@ async function addMemberToSheet({
   platoon = null
 }) {
   const schuetzen =
-    isSchuetzenRegiment(
-      spreadsheetId
+    usesSchuetzenPositionStructure(
+      spreadsheetId,
+      sheetName
     );
 
   if (!schuetzen) {
@@ -5970,6 +6026,22 @@ client.on(
             )
             ?.trim() || null;
 
+        const inactivityDuration =
+          interaction.options
+            .getString(
+              "inactivity_duration",
+              false
+            )
+            ?.trim() || null;
+
+        const inactivityReason =
+          interaction.options
+            .getString(
+              "inactivity_reason",
+              false
+            )
+            ?.trim() || null;
+
         const existingMember =
           await findMemberByDiscordId(
             discordMember.id
@@ -5992,70 +6064,6 @@ client.on(
         const newRegiment =
           resolveRegiment(
             newRegimentValue
-          );
-
-        let destinationPosition =
-          null;
-
-        let positionWarning =
-          null;
-
-        if (
-          isSchuetzenRegiment(
-            newRegiment
-          )
-        ) {
-          if (!newPositionValue) {
-            await interaction.editReply(
-              [
-                "The transfer was not made.",
-                "",
-                "**Schlesisches Schützen-Bataillon uses a position system.**",
-                "Choose **Company Commander**, **1. Platoon**, or **2. Platoon** in the `new_position` option and try again."
-              ].join("\n")
-            );
-            return;
-          }
-
-          try {
-            destinationPosition =
-              resolveSchuetzenPosition(
-                newPositionValue
-              );
-          } catch {
-            await interaction.editReply(
-              "That destination Schützen position is not configured."
-            );
-            return;
-          }
-        } else if (newPositionValue) {
-          positionWarning =
-            `⚠️ Position ignored: ${newRegiment.displayName} does not use the Schützen platoon/position system.`;
-        }
-
-        const sameRegiment =
-          existingMember.regiment.spreadsheetId ===
-          newRegiment.spreadsheetId;
-
-        const currentPosition =
-          isSchuetzenRegiment(
-            existingMember.regiment
-          )
-            ? getSchuetzenPositionForRow(
-                existingMember.row
-              )
-            : null;
-
-        const sameCompany =
-          normalizeText(
-            existingMember.companyName
-          ) === normalizeText(newCompany) &&
-          (
-            !isSchuetzenRegiment(
-              newRegiment
-            ) ||
-            currentPosition?.key ===
-              destinationPosition?.key
           );
 
         const availableCompanies =
@@ -6084,6 +6092,117 @@ client.on(
           return;
         }
 
+        const destinationIsGarnison =
+          isGarnisonCompany(
+            matchedCompany
+          );
+
+        const destinationUsesSchuetzenPositions =
+          usesSchuetzenPositionStructure(
+            newRegiment,
+            matchedCompany
+          );
+
+        let destinationPosition =
+          null;
+
+        let positionWarning =
+          null;
+
+        if (
+          destinationUsesSchuetzenPositions
+        ) {
+          if (!newPositionValue) {
+            await interaction.editReply(
+              [
+                "The transfer was not made.",
+                "",
+                "**The selected Schützen company uses a position system.**",
+                "Choose **Company Commander**, **1. Platoon**, or **2. Platoon** in the `new_position` option and try again."
+              ].join("\n")
+            );
+            return;
+          }
+
+          try {
+            destinationPosition =
+              resolveSchuetzenPosition(
+                newPositionValue
+              );
+          } catch {
+            await interaction.editReply(
+              "That destination Schützen position is not configured."
+            );
+            return;
+          }
+        } else if (newPositionValue) {
+          positionWarning =
+            destinationIsGarnison
+              ? "Position ignored: Garnison Kompanie does not use Company Commander or platoon positions."
+              : "Position ignored: the selected destination company does not use the Schützen position system.";
+        }
+
+        /*
+         * Discord slash-command options cannot be conditionally required based
+         * on the company dropdown, so these are optional in deploy-commands.js
+         * and enforced here only when the destination is Garnison.
+         */
+        if (destinationIsGarnison) {
+          if (!inactivityDuration) {
+            await interaction.editReply(
+              [
+                "The transfer was not made.",
+                "",
+                "**Garnison Kompanie requires an inactivity duration.**",
+                "Enter it in `inactivity_duration` (for example: `2 weeks`, `Until 09/20/2026`, or `Indefinite`)."
+              ].join("\n")
+            );
+            return;
+          }
+
+          if (!inactivityReason) {
+            await interaction.editReply(
+              [
+                "The transfer was not made.",
+                "",
+                "**Garnison Kompanie requires a reason for inactivity.**",
+                "Enter it in `inactivity_reason` and try again."
+              ].join("\n")
+            );
+            return;
+          }
+        }
+
+        const sameRegiment =
+          existingMember.regiment.spreadsheetId ===
+          newRegiment.spreadsheetId;
+
+        const currentUsesSchuetzenPositions =
+          usesSchuetzenPositionStructure(
+            existingMember.regiment,
+            existingMember.companyName
+          );
+
+        const currentPosition =
+          currentUsesSchuetzenPositions
+            ? getSchuetzenPositionForRow(
+                existingMember.row
+              )
+            : null;
+
+        const sameCompany =
+          normalizeText(
+            existingMember.companyName
+          ) === normalizeText(matchedCompany) &&
+          (
+            !destinationUsesSchuetzenPositions ||
+            (
+              currentUsesSchuetzenPositions &&
+              currentPosition?.key ===
+                destinationPosition?.key
+            )
+          );
+
         const memberRecord =
           await getMemberRecord({
             spreadsheetId:
@@ -6107,8 +6226,9 @@ client.on(
 
         try {
           if (
-            !isSchuetzenRegiment(
-              newRegiment
+            !usesSchuetzenPositionStructure(
+              newRegiment,
+              matchedCompany
             )
           ) {
             assertCompanyRankAllowed(
@@ -6150,7 +6270,17 @@ client.on(
          * still be used to apply the optional new rank without moving rows.
          */
         if (sameRegiment && sameCompany) {
-          if (!rankChanged) {
+          const updatingGarnisonInactivity =
+            destinationIsGarnison &&
+            Boolean(
+              inactivityDuration &&
+              inactivityReason
+            );
+
+          if (
+            !rankChanged &&
+            !updatingGarnisonInactivity
+          ) {
             await interaction.editReply(
               [
                 "That member is already assigned to the selected regiment and company.",
@@ -6162,13 +6292,16 @@ client.on(
                 requestedNewRank
                   ? "That member already has the selected rank."
                   : "No new rank was supplied.",
-                "No spreadsheet cells were changed."
+                destinationIsGarnison
+                  ? "Provide both `inactivity_duration` and `inactivity_reason` to update the Garnison inactivity record."
+                  : "No spreadsheet cells were changed."
               ].join("\n")
             );
             return;
           }
 
-          await updateMemberRank({
+          if (rankChanged) {
+            await updateMemberRank({
             spreadsheetId:
               existingMember.regiment.spreadsheetId,
             sheetName:
@@ -6177,7 +6310,23 @@ client.on(
               existingMember.row,
             rank:
               finalRank
-          });
+            });
+          }
+
+          if (updatingGarnisonInactivity) {
+            await writeGarnisonInactivity({
+              spreadsheetId:
+                existingMember.regiment.spreadsheetId,
+              sheetName:
+                existingMember.companyName,
+              row:
+                existingMember.row,
+              duration:
+                inactivityDuration,
+              reason:
+                inactivityReason
+            });
+          }
 
           await sortCompanyByRank({
             spreadsheetId:
@@ -6229,7 +6378,9 @@ client.on(
           }
 
           const rankOnlyReply = [
-            "Member rank updated successfully through /transfer.",
+            destinationIsGarnison && !rankChanged
+              ? "Garnison inactivity information updated successfully through /transfer."
+              : "Member transfer information updated successfully.",
             "",
             `**Discord Member:** ${discordMember}`,
             `**Discord ID:** ${discordMember.id}`,
@@ -6240,6 +6391,13 @@ client.on(
             `**Previous Rank:** ${previousRank || "Not set"}`,
             `**New Rank:** ${finalRank}`
           ];
+
+          if (destinationIsGarnison) {
+            rankOnlyReply.push(
+              `**Duration of Inactivity:** ${inactivityDuration}`,
+              `**Reason for Inactivity:** ${inactivityReason}`
+            );
+          }
 
           if (updatedNickname) {
             rankOnlyReply.push(
@@ -6317,6 +6475,21 @@ client.on(
             position:
               destinationPosition
           });
+
+        if (destinationIsGarnison) {
+          await writeGarnisonInactivity({
+            spreadsheetId:
+              newRegiment.spreadsheetId,
+            sheetName:
+              matchedCompany,
+            row:
+              destinationRow,
+            duration:
+              inactivityDuration,
+            reason:
+              inactivityReason
+          });
+        }
 
         try {
           await removeMemberFromSheet({
@@ -7631,39 +7804,6 @@ client.on(
 
       const regiment = resolveRegiment(regimentValue);
 
-      let schuetzenPosition =
-        null;
-
-      if (
-        isSchuetzenRegiment(
-          regiment
-        )
-      ) {
-        if (!positionValue) {
-          await interaction.editReply(
-            [
-              "The member was not added.",
-              "",
-              "**Schlesisches Schützen-Bataillon uses a position system.**",
-              "Select **Company Commander**, **1. Platoon**, or **2. Platoon** in the `position` option and try again."
-            ].join("\n")
-          );
-          return;
-        }
-
-        try {
-          schuetzenPosition =
-            resolveSchuetzenPosition(
-              positionValue
-            );
-        } catch {
-          await interaction.editReply(
-            "That Schützen position is not configured."
-          );
-          return;
-        }
-      }
-
       const availableCompanies =
         await getCompanySheetNames(
           regiment
@@ -7691,6 +7831,43 @@ client.on(
         return;
       }
 
+      const companyUsesSchuetzenPositions =
+        usesSchuetzenPositionStructure(
+          regiment,
+          matchedCompany
+        );
+
+      let schuetzenPosition =
+        null;
+
+      if (
+        companyUsesSchuetzenPositions
+      ) {
+        if (!positionValue) {
+          await interaction.editReply(
+            [
+              "The member was not added.",
+              "",
+              "**The selected Schützen company uses a position system.**",
+              "Select **Company Commander**, **1. Platoon**, or **2. Platoon** in the `position` option and try again."
+            ].join("\n")
+          );
+          return;
+        }
+
+        try {
+          schuetzenPosition =
+            resolveSchuetzenPosition(
+              positionValue
+            );
+        } catch {
+          await interaction.editReply(
+            "That Schützen position is not configured."
+          );
+          return;
+        }
+      }
+
       console.log("REKRUT VALIDATION:", {
         rank,
         company: matchedCompany,
@@ -7708,8 +7885,9 @@ client.on(
 
       try {
         if (
-          !isSchuetzenRegiment(
-            regiment
+          !usesSchuetzenPositionStructure(
+            regiment,
+            matchedCompany
           )
         ) {
           assertCompanyRankAllowed(
