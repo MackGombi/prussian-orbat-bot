@@ -908,7 +908,11 @@ async function getCompanyRosterSummary({
   sheetName
 }) {
   const safeSheetName = escapeSheetName(sheetName);
-  const lastMemberRow = getLastMemberRow(sheetName);
+  const lastMemberRow =
+    getLastMemberRowForSpreadsheet(
+      spreadsheetId,
+      sheetName
+    );
 
   const response = await sheets.spreadsheets.values.get({
     spreadsheetId,
@@ -949,7 +953,11 @@ async function getMissingAttendanceMembers({
 }) {
   const attendanceColumn = getAttendanceColumn(sheetName, day);
   const safeSheetName = escapeSheetName(sheetName);
-  const lastMemberRow = getLastMemberRow(sheetName);
+  const lastMemberRow =
+    getLastMemberRowForSpreadsheet(
+      spreadsheetId,
+      sheetName
+    );
   const lastColumn = isSecondKrumperCompany(sheetName) ? "I" : "N";
 
   const response = await sheets.spreadsheets.values.get({
@@ -991,7 +999,10 @@ async function getCompanyAttendanceView({
     escapeSheetName(sheetName);
 
   const lastMemberRow =
-    getLastMemberRow(sheetName);
+    getLastMemberRowForSpreadsheet(
+      spreadsheetId,
+      sheetName
+    );
 
   const lastColumn =
     isSecondKrumperCompany(sheetName)
