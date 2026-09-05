@@ -475,7 +475,7 @@ const commands = [
   new SlashCommandBuilder()
     .setName("attendance")
     .setDescription(
-      "Opens an interactive multi-day company attendance board."
+      "Starts a multi-member company attendance entry."
     )
     .addStringOption(option =>
       option

@@ -741,6 +741,13 @@ function isMusketierCompany(sheetName) {
   return normalizeText(sheetName).includes("musketier");
 }
 
+function isGarnisonCompany(sheetName) {
+  return (
+    normalizeText(sheetName) ===
+    normalizeText(GARNISON_SHEET_NAME)
+  );
+}
+
 /*
 |--------------------------------------------------------------------------
 | Attendance rules
@@ -1357,8 +1364,11 @@ function getSortLastColumn(sheetName) {
    * 1. Krümper-Kompanie:
    *   C:H = identity/rank data plus entry date H.
    *
-   * Generalstab/command/Garnison:
+   * Generalstab/command:
    *   C:G = normal member data only.
+   *
+   * Garnison Kompanie is handled by sortGarnisonByRank() because
+   * I:L and M:N are merged inactivity fields.
    */
   if (isFirstKrumperCompany(sheetName)) {
     return "H";
@@ -1499,11 +1509,172 @@ async function sortRowRangeByRank({
   return members.length;
 }
 
+async function sortGarnisonByRank({
+  spreadsheetId,
+  sheetName
+}) {
+  const safeSheetName =
+    escapeSheetName(sheetName);
+
+  const firstRow =
+    FIRST_MEMBER_ROW;
+  const lastRow =
+    GARNISON_LAST_MEMBER_ROW;
+  const slotCount =
+    lastRow - firstRow + 1;
+
+  /*
+   * Garnison layout:
+   *   C = Name
+   *   D = Discord ID
+   *   E = Rank
+   *   F = Timezone
+   *   G = internal timezone storage
+   *   H = Date Added
+   *   I:L = Duration of Inactivity (merged; I is the writable anchor)
+   *   M:N = Reason for Inactivity (merged; M is the writable anchor)
+   *
+   * Read the merged-field anchors separately. Writing C:N as one block can
+   * fail because Google Sheets does not allow partial writes through merged
+   * cells. This preserves the merge formatting while keeping each member's
+   * date/inactivity data attached to that member during rank sorting.
+   */
+  const response =
+    await sheets.spreadsheets.values.batchGet({
+      spreadsheetId,
+      ranges: [
+        `${safeSheetName}!C${firstRow}:H${lastRow}`,
+        `${safeSheetName}!I${firstRow}:I${lastRow}`,
+        `${safeSheetName}!M${firstRow}:M${lastRow}`
+      ],
+      majorDimension: "ROWS"
+    });
+
+  const coreRows =
+    response.data.valueRanges?.[0]?.values || [];
+  const inactivityRows =
+    response.data.valueRanges?.[1]?.values || [];
+  const reasonRows =
+    response.data.valueRanges?.[2]?.values || [];
+
+  const members =
+    Array.from(
+      { length: slotCount },
+      (_, index) => {
+        const core =
+          Array.from(
+            { length: 6 },
+            (_, columnIndex) =>
+              coreRows[index]?.[columnIndex] ?? ""
+          );
+
+        return {
+          core,
+          inactivity:
+            inactivityRows[index]?.[0] ?? "",
+          reason:
+            reasonRows[index]?.[0] ?? ""
+        };
+      }
+    )
+      .filter(member =>
+        String(member.core[0] || "").trim() ||
+        String(member.core[1] || "").trim()
+      );
+
+  members.sort((a, b) => {
+    const rankA =
+      RANK_SORT_PRIORITY.get(
+        normalizeText(a.core[2])
+      ) ?? 999;
+
+    const rankB =
+      RANK_SORT_PRIORITY.get(
+        normalizeText(b.core[2])
+      ) ?? 999;
+
+    if (rankA !== rankB) {
+      return rankA - rankB;
+    }
+
+    return String(
+      a.core[0] || ""
+    ).localeCompare(
+      String(b.core[0] || ""),
+      undefined,
+      {
+        sensitivity: "base"
+      }
+    );
+  });
+
+  const rewrittenCore =
+    Array.from(
+      { length: slotCount },
+      (_, index) =>
+        members[index]?.core ||
+        Array(6).fill("")
+    );
+
+  const rewrittenInactivity =
+    Array.from(
+      { length: slotCount },
+      (_, index) => [
+        members[index]?.inactivity || ""
+      ]
+    );
+
+  const rewrittenReason =
+    Array.from(
+      { length: slotCount },
+      (_, index) => [
+        members[index]?.reason || ""
+      ]
+    );
+
+  await sheets.spreadsheets.values.batchUpdate({
+    spreadsheetId,
+    requestBody: {
+      valueInputOption: "USER_ENTERED",
+      data: [
+        {
+          range:
+            `${safeSheetName}!C${firstRow}:H${lastRow}`,
+          values:
+            rewrittenCore
+        },
+        {
+          range:
+            `${safeSheetName}!I${firstRow}:I${lastRow}`,
+          values:
+            rewrittenInactivity
+        },
+        {
+          range:
+            `${safeSheetName}!M${firstRow}:M${lastRow}`,
+          values:
+            rewrittenReason
+        }
+      ]
+    }
+  });
+
+  return members.length;
+}
+
+
 async function sortCompanyByRank({
   spreadsheetId,
   sheetName,
   platoon = null
 }) {
+  if (isGarnisonCompany(sheetName)) {
+    return sortGarnisonByRank({
+      spreadsheetId,
+      sheetName
+    });
+  }
+
   if (
     isSchuetzenRegiment(
       spreadsheetId
@@ -2084,20 +2255,37 @@ async function removeMemberFromSheet({
    * 1. Krümper-Kompanie:
    *   H = entry date -> clear it when the member leaves.
    *
-   * Generalstab / Garnison / other excluded sheets:
+   * Garnison Kompanie:
+   *   C:N is the member-owned record and is cleared in full.
+   *
+   * Generalstab / other excluded sheets:
    *   no attendance markers are transferred.
    *
    * Column G is internal timezone storage and is cleaned by the
    * subsequent company sort; it is never copied to the destination.
    */
-  const ranges = [
-    `${safeSheetName}!C${row}`,
-    `${safeSheetName}!D${row}`,
-    `${safeSheetName}!E${row}`,
-    `${safeSheetName}!F${row}`
-  ];
+  const ranges =
+    isGarnisonCompany(sheetName)
+      ? [
+          `${safeSheetName}!C${row}:N${row}`
+        ]
+      : [
+          `${safeSheetName}!C${row}`,
+          `${safeSheetName}!D${row}`,
+          `${safeSheetName}!E${row}`,
+          `${safeSheetName}!F${row}`
+        ];
 
-  if (isFirstKrumperCompany(sheetName)) {
+  if (isGarnisonCompany(sheetName)) {
+    /*
+     * C:N covers the full Garnison member record, including:
+     * H = Date Added,
+     * I:L = Duration of Inactivity,
+     * M:N = Reason for Inactivity.
+     *
+     * The full merged ranges are included so no stale inactivity data remains.
+     */
+  } else if (isFirstKrumperCompany(sheetName)) {
     ranges.push(
       `${safeSheetName}!H${row}`
     );
@@ -2129,7 +2317,10 @@ async function removeMemberFromSheet({
     {
       sheetName,
       row,
-      transferredColumns: ["C", "D", "E", "F"],
+      transferredColumns:
+        isGarnisonCompany(sheetName)
+          ? ["C", "D", "E", "F", "G", "H", "I:L", "M:N"]
+          : ["C", "D", "E", "F"],
       clearedRanges: ranges
     }
   );
@@ -2295,11 +2486,46 @@ async function addMemberToSheet({
         date: entryDate
       }
     );
+  } else if (
+    !schuetzen &&
+    isGarnisonCompany(sheetName)
+  ) {
+    const dateAdded =
+      getCurrentOrbatDate();
+
+    writeData.push(
+      {
+        range: `${safeSheetName}!H${row}`,
+        values: [[dateAdded]]
+      },
+      {
+        /*
+         * I is the top-left writable cell of merged I:L.
+         */
+        range: `${safeSheetName}!I${row}`,
+        values: [[""]]
+      },
+      {
+        /*
+         * M is the top-left writable cell of merged M:N.
+         */
+        range: `${safeSheetName}!M${row}`,
+        values: [[""]]
+      }
+    );
+
+    console.log(
+      "GARNISON DATE ADDED QUEUED:",
+      {
+        sheetName,
+        row,
+        date: dateAdded
+      }
+    );
   } else if (!schuetzen) {
     /*
-     * A date must NEVER follow a member into another company.
-     * Explicitly blank H on every non-1. Krümper-Kompanie write in case
-     * that roster slot contains stale data from an older bot version.
+     * A Krümper entry date must NEVER follow a member into another company.
+     * Explicitly blank H for ordinary non-Garnison, non-1. Krümper writes.
      */
     writeData.push({
       range: `${safeSheetName}!H${row}`,
