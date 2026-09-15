@@ -62,7 +62,7 @@ const REGIMENT_CHOICES = [
   }
 ];
 
-const SCHUETZEN_POSITION_CHOICES = [
+const PLATOON_POSITION_CHOICES = [
   {
     name: "Company Commander",
     value: "company_commander"
@@ -181,10 +181,10 @@ const commands = [
       option
         .setName("position")
         .setDescription(
-          "Schützen combat company only; not used for Garnison."
+          "Required for Schützen/Jäger companies; not used for Garnison."
         )
         .setRequired(false)
-        .addChoices(...SCHUETZEN_POSITION_CHOICES)
+        .addChoices(...PLATOON_POSITION_CHOICES)
     )
     .toJSON(),
 
@@ -232,10 +232,10 @@ const commands = [
       option
         .setName("new_position")
         .setDescription(
-          "Schützen combat company only; ignored for Garnison."
+          "Schützen/Jäger company only; ignored for Garnison."
         )
         .setRequired(false)
-        .addChoices(...SCHUETZEN_POSITION_CHOICES)
+        .addChoices(...PLATOON_POSITION_CHOICES)
     )
     .addStringOption(option =>
       option

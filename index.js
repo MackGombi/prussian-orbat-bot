@@ -518,10 +518,19 @@ function usesSchuetzenPositionStructure(
   regimentOrSpreadsheetId,
   sheetName
 ) {
+  const spreadsheetId =
+    typeof regimentOrSpreadsheetId === "string"
+      ? regimentOrSpreadsheetId
+      : regimentOrSpreadsheetId?.spreadsheetId;
+
+  const usesPlatoonSystem =
+    String(spreadsheetId || "").trim() ===
+      SCHUETZEN_SPREADSHEET_ID ||
+    String(spreadsheetId || "").trim() ===
+      JAEGER_SPREADSHEET_ID;
+
   return (
-    isSchuetzenRegiment(
-      regimentOrSpreadsheetId
-    ) &&
+    usesPlatoonSystem &&
     !isGarnisonCompany(sheetName) &&
     !isGeneralstabOrCommandSheet(sheetName)
   );
@@ -6117,7 +6126,7 @@ client.on(
               [
                 "The transfer was not made.",
                 "",
-                "**The selected Schützen company uses a position system.**",
+                "**The selected Schützen/Jäger company uses a position system.**",
                 "Choose **Company Commander**, **1. Platoon**, or **2. Platoon** in the `new_position` option and try again."
               ].join("\n")
             );
@@ -6131,7 +6140,7 @@ client.on(
               );
           } catch {
             await interaction.editReply(
-              "That destination Schützen position is not configured."
+              "That destination Schützen/Jäger position is not configured."
             );
             return;
           }
@@ -6139,7 +6148,7 @@ client.on(
           positionWarning =
             destinationIsGarnison
               ? "Position ignored: Garnison Kompanie does not use Company Commander or platoon positions."
-              : "Position ignored: the selected destination company does not use the Schützen position system.";
+              : "Position ignored: the selected destination company does not use the Schützen/Jäger position system.";
         }
 
         /*
@@ -7848,7 +7857,7 @@ client.on(
             [
               "The member was not added.",
               "",
-              "**The selected Schützen company uses a position system.**",
+              "**The selected Schützen/Jäger company uses a position system.**",
               "Select **Company Commander**, **1. Platoon**, or **2. Platoon** in the `position` option and try again."
             ].join("\n")
           );
@@ -7862,7 +7871,7 @@ client.on(
             );
         } catch {
           await interaction.editReply(
-            "That Schützen position is not configured."
+            "That Schützen/Jäger position is not configured."
           );
           return;
         }
