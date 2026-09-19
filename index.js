@@ -2612,67 +2612,140 @@ function formatDiscordJoinDate(joinedAt) {
 }
 
 
-async function getDiscordArmyJoinDates() {
+async function getDiscordArmyJoinDates(discordIds) {
   const joinDates =
     new Map();
 
-  /*
-   * Fetch the guild member list once for the migration.
-   * This requires the GuildMembers intent, which this bot already uses
-   * for member/role operations.
-   */
-  for (
-    const guild of
-    client.guilds.cache.values()
+  const uniqueIds =
+    [
+      ...new Set(
+        discordIds
+          .map(
+            id =>
+              String(id || "").trim()
+          )
+          .filter(Boolean)
+      )
+    ];
+
+  if (
+    uniqueIds.length === 0
   ) {
-    try {
-      const members =
-        await guild.members.fetch();
+    return joinDates;
+  }
 
-      for (
-        const member of
-        members.values()
-      ) {
-        const discordId =
-          String(
-            member.id || ""
-          ).trim();
+  const guilds =
+    [
+      ...client.guilds.cache.values()
+    ];
 
-        const joinedAt =
-          member.joinedAt;
+  /*
+   * Fetch ONLY the Discord IDs found in the ORBAT.
+   * This avoids guild.members.fetch() for the entire server, which
+   * previously timed out with GuildMembersTimeout.
+   *
+   * We use small batches so Discord is not asked for the whole Army
+   * in one request. If a batch request fails, fall back to individual
+   * member fetches for that batch.
+   */
+  const MEMBER_BATCH_SIZE = 50;
 
-        if (
-          !discordId ||
-          !joinedAt
+  for (const guild of guilds) {
+    for (
+      let index = 0;
+      index < uniqueIds.length;
+      index += MEMBER_BATCH_SIZE
+    ) {
+      const batch =
+        uniqueIds.slice(
+          index,
+          index + MEMBER_BATCH_SIZE
+        );
+
+      try {
+        const members =
+          await guild.members.fetch({
+            user: batch,
+            force: true
+          });
+
+        for (
+          const member of
+          members.values()
         ) {
-          continue;
+          if (
+            !member?.id ||
+            !member.joinedAt
+          ) {
+            continue;
+          }
+
+          const existing =
+            joinDates.get(
+              member.id
+            );
+
+          if (
+            !existing ||
+            member.joinedAt.getTime() <
+              existing.getTime()
+          ) {
+            joinDates.set(
+              member.id,
+              member.joinedAt
+            );
+          }
         }
+      } catch (batchError) {
+        console.warn(
+          `[MASTER ROSTER] Batch Discord member fetch failed for guild ${guild.id}; falling back to individual member fetches.`
+        );
+        console.warn(
+          batchError?.message ||
+          batchError
+        );
 
-        const existing =
-          joinDates.get(
-            discordId
-          );
+        for (const discordId of batch) {
+          try {
+            const member =
+              await guild.members.fetch({
+                user:
+                  discordId,
+                force:
+                  true
+              });
 
-        /*
-         * If the bot is in more than one guild, use the earliest
-         * server join date that Discord exposes for the member.
-         */
-        if (
-          !existing ||
-          joinedAt.getTime() <
-            existing.getTime()
-        ) {
-          joinDates.set(
-            discordId,
-            joinedAt
-          );
+            if (
+              member?.joinedAt
+            ) {
+              const existing =
+                joinDates.get(
+                  discordId
+                );
+
+              if (
+                !existing ||
+                member.joinedAt.getTime() <
+                  existing.getTime()
+              ) {
+                joinDates.set(
+                  discordId,
+                  member.joinedAt
+                );
+              }
+            }
+          } catch (memberError) {
+            /*
+             * This normally means the Discord ID is not currently
+             * a member of this guild, or Discord could not return it.
+             * Do not fail the whole Master Roster sync.
+             */
+            console.warn(
+              `[MASTER ROSTER] Could not fetch Discord member ${discordId} from guild ${guild.id}: ${memberError?.message || memberError}`
+            );
+          }
         }
       }
-    } catch (error) {
-      console.error(
-        `[MASTER ROSTER] Could not fetch members for guild ${guild.id}:`
-      );
-      console.error(error);
     }
   }
 
@@ -2691,16 +2764,6 @@ async function syncAllOrbatsToMasterRoster() {
     errors: []
   };
 
-  console.log(
-    "[MASTER ROSTER] Fetching Discord server join dates..."
-  );
-
-  const discordJoinDates =
-    await getDiscordArmyJoinDates();
-
-  console.log(
-    `[MASTER ROSTER] Discord join dates loaded: ${discordJoinDates.size}`
-  );
 
   /*
    * STEP 1:
@@ -2894,6 +2957,26 @@ async function syncAllOrbatsToMasterRoster() {
 
   /*
    * STEP 3:
+   * Now that the ORBAT scan is complete, fetch ONLY the Discord
+   * members whose IDs actually appear in the Army ORBAT.
+   */
+  console.log(
+    `[MASTER ROSTER] Fetching Discord join dates for ${armyMembers.size} ORBAT members...`
+  );
+
+  const discordJoinDates =
+    await getDiscordArmyJoinDates(
+      [
+        ...armyMembers.keys()
+      ]
+    );
+
+  console.log(
+    `[MASTER ROSTER] Discord join dates loaded: ${discordJoinDates.size}/${armyMembers.size}`
+  );
+
+  /*
+   * STEP 4:
    * Build ALL Master Roster writes in memory.
    *
    * Existing members preserve Date Joined Army.
@@ -3064,7 +3147,7 @@ async function syncAllOrbatsToMasterRoster() {
   }
 
   /*
-   * STEP 4:
+   * STEP 5:
    * Batch write instead of member-by-member writes.
    * Google accepts many ranges in one values.batchUpdate request.
    */
