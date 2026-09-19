@@ -2576,6 +2576,110 @@ async function markMasterRosterMemberInactive({
 
 
 
+
+function formatDiscordJoinDate(joinedAt) {
+  if (!joinedAt) {
+    return "";
+  }
+
+  const date =
+    joinedAt instanceof Date
+      ? joinedAt
+      : new Date(joinedAt);
+
+  if (
+    Number.isNaN(
+      date.getTime()
+    )
+  ) {
+    return "";
+  }
+
+  const month =
+    String(
+      date.getMonth() + 1
+    ).padStart(2, "0");
+
+  const day =
+    String(
+      date.getDate()
+    ).padStart(2, "0");
+
+  const year =
+    date.getFullYear();
+
+  return `${month}/${day}/${year}`;
+}
+
+
+async function getDiscordArmyJoinDates() {
+  const joinDates =
+    new Map();
+
+  /*
+   * Fetch the guild member list once for the migration.
+   * This requires the GuildMembers intent, which this bot already uses
+   * for member/role operations.
+   */
+  for (
+    const guild of
+    client.guilds.cache.values()
+  ) {
+    try {
+      const members =
+        await guild.members.fetch();
+
+      for (
+        const member of
+        members.values()
+      ) {
+        const discordId =
+          String(
+            member.id || ""
+          ).trim();
+
+        const joinedAt =
+          member.joinedAt;
+
+        if (
+          !discordId ||
+          !joinedAt
+        ) {
+          continue;
+        }
+
+        const existing =
+          joinDates.get(
+            discordId
+          );
+
+        /*
+         * If the bot is in more than one guild, use the earliest
+         * server join date that Discord exposes for the member.
+         */
+        if (
+          !existing ||
+          joinedAt.getTime() <
+            existing.getTime()
+        ) {
+          joinDates.set(
+            discordId,
+            joinedAt
+          );
+        }
+      }
+    } catch (error) {
+      console.error(
+        `[MASTER ROSTER] Could not fetch members for guild ${guild.id}:`
+      );
+      console.error(error);
+    }
+  }
+
+  return joinDates;
+}
+
+
 async function syncAllOrbatsToMasterRoster() {
   const result = {
     found: 0,
@@ -2586,6 +2690,17 @@ async function syncAllOrbatsToMasterRoster() {
     skipped: 0,
     errors: []
   };
+
+  console.log(
+    "[MASTER ROSTER] Fetching Discord server join dates..."
+  );
+
+  const discordJoinDates =
+    await getDiscordArmyJoinDates();
+
+  console.log(
+    `[MASTER ROSTER] Discord join dates loaded: ${discordJoinDates.size}`
+  );
 
   /*
    * STEP 1:
@@ -2807,11 +2922,47 @@ async function syncAllOrbatsToMasterRoster() {
           member.rank
         );
 
+      const discordJoinedDate =
+        formatDiscordJoinDate(
+          discordJoinDates.get(
+            member.discordId
+          )
+        );
+
+      /*
+       * 09/19/2026 was the placeholder date used by the first
+       * Master Roster import. Replace that placeholder (or a blank
+       * value) with the Discord server join date when available.
+       *
+       * Any other existing Date Joined Army is treated as intentional
+       * historical data and is preserved.
+       */
+      const existingJoinDate =
+        String(
+          existing.dateJoined || ""
+        ).trim();
+
+      const shouldRepairJoinDate =
+        !existingJoinDate ||
+        existingJoinDate ===
+          "09/19/2026" ||
+        existingJoinDate ===
+          "9/19/2026";
+
+      const dateJoinedArmy =
+        shouldRepairJoinDate
+          ? (
+              discordJoinedDate ||
+              existingJoinDate ||
+              ""
+            )
+          : existingJoinDate;
+
       const rowValues = [
         member.robloxUsername,
         member.discordId,
         member.rank,
-        existing.dateJoined || today,
+        dateJoinedArmy,
         rankChanged
           ? today
           : (
@@ -2870,6 +3021,13 @@ async function syncAllOrbatsToMasterRoster() {
       nextMasterRow += 1;
     }
 
+    const discordJoinedDate =
+      formatDiscordJoinDate(
+        discordJoinDates.get(
+          member.discordId
+        )
+      );
+
     updates.push({
       range:
         `${safeMasterSheetName}!B${nextMasterRow}:J${nextMasterRow}`,
@@ -2877,7 +3035,7 @@ async function syncAllOrbatsToMasterRoster() {
         member.robloxUsername,
         member.discordId,
         member.rank,
-        today,
+        discordJoinedDate,
         today,
         member.regiment,
         member.kompanie,
@@ -2893,7 +3051,7 @@ async function syncAllOrbatsToMasterRoster() {
           nextMasterRow,
         ...member,
         dateJoined:
-          today,
+          discordJoinedDate,
         dateOfCurrentRank:
           today,
         active:
