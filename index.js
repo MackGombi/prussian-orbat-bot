@@ -5472,6 +5472,18 @@ client.once(Events.ClientReady, readyClient => {
 client.on(
   Events.InteractionCreate,
   async interaction => {
+    console.log(
+      "[INTERACTION RECEIVED]",
+      {
+        type: interaction.type,
+        commandName:
+          interaction.commandName || null,
+        isChatInputCommand:
+          interaction.isChatInputCommand(),
+        isAutocomplete:
+          interaction.isAutocomplete()
+      }
+    );
     if (interaction.isAutocomplete()) {
       const isCompanyAutocompleteCommand =
         interaction.commandName ===
