@@ -2577,11 +2577,9 @@ async function markMasterRosterMemberInactive({
 
 
 async function syncAllOrbatsToMasterRoster() {
-  const seenDiscordIds =
-    new Set();
-
   const result = {
-    scanned: 0,
+    found: 0,
+    uniqueDiscordIds: 0,
     added: 0,
     updated: 0,
     duplicates: 0,
@@ -2589,11 +2587,123 @@ async function syncAllOrbatsToMasterRoster() {
     errors: []
   };
 
-  for (const regiment of REGIMENTS) {
-    const companies =
-      await getCompanySheetNames(
-        regiment
+  /*
+   * STEP 1:
+   * Read the Master Roster ONCE and build an in-memory lookup.
+   */
+  const masterSheetName =
+    await getMasterRosterSheetName();
+
+  const safeMasterSheetName =
+    escapeSheetName(masterSheetName);
+
+  const masterResponse =
+    await sheets.spreadsheets.values.get({
+      spreadsheetId:
+        MASTER_ROSTER_SPREADSHEET_ID,
+      range:
+        `${safeMasterSheetName}!B${MASTER_ROSTER_FIRST_MEMBER_ROW}:J`,
+      majorDimension: "ROWS"
+    });
+
+  const masterRows =
+    masterResponse.data.values || [];
+
+  const masterByDiscordId =
+    new Map();
+
+  let nextMasterRow =
+    MASTER_ROSTER_FIRST_MEMBER_ROW;
+
+  for (
+    let index = 0;
+    index < masterRows.length;
+    index += 1
+  ) {
+    const rowNumber =
+      MASTER_ROSTER_FIRST_MEMBER_ROW +
+      index;
+
+    const row =
+      masterRows[index] || [];
+
+    const discordId =
+      String(row[1] || "").trim();
+
+    if (discordId) {
+      masterByDiscordId.set(
+        discordId,
+        {
+          row: rowNumber,
+          robloxUsername:
+            String(row[0] || "").trim(),
+          discordId,
+          rank:
+            String(row[2] || "").trim(),
+          dateJoined:
+            String(row[3] || "").trim(),
+          dateOfCurrentRank:
+            String(row[4] || "").trim(),
+          regiment:
+            String(row[5] || "").trim(),
+          kompanie:
+            String(row[6] || "").trim(),
+          position:
+            String(row[7] || "").trim(),
+          active:
+            String(row[8] || "").trim()
+        }
       );
+    }
+
+    /*
+     * Reuse the first completely empty Discord-ID row if there is one.
+     * Otherwise append after the current roster data.
+     */
+    if (
+      !discordId &&
+      nextMasterRow ===
+        MASTER_ROSTER_FIRST_MEMBER_ROW
+    ) {
+      nextMasterRow =
+        rowNumber;
+    }
+  }
+
+  if (
+    masterRows.length > 0 &&
+    nextMasterRow ===
+      MASTER_ROSTER_FIRST_MEMBER_ROW &&
+    String(
+      masterRows[0]?.[1] || ""
+    ).trim()
+  ) {
+    nextMasterRow =
+      MASTER_ROSTER_FIRST_MEMBER_ROW +
+      masterRows.length;
+  }
+
+  /*
+   * STEP 2:
+   * Read all ORBAT companies and collect members in memory.
+   */
+  const armyMembers =
+    new Map();
+
+  for (const regiment of REGIMENTS) {
+    let companies;
+
+    try {
+      companies =
+        await getCompanySheetNames(
+          regiment
+        );
+    } catch (error) {
+      result.errors.push(
+        `${regiment.displayName}: ${error?.message || "Could not read company list."}`
+      );
+      continue;
+    }
 
     for (const company of companies) {
       let summary;
@@ -2608,46 +2718,26 @@ async function syncAllOrbatsToMasterRoster() {
           });
       } catch (error) {
         result.errors.push(
-          `${regiment.displayName} / ${company}: ` +
-          `${error?.message || "Could not read company."}`
+          `${regiment.displayName} / ${company}: ${error?.message || "Could not read company."}`
         );
         continue;
       }
 
       for (const member of summary.members) {
+        result.found += 1;
+
         const discordId =
           String(
             member.discordId || ""
           ).trim();
 
-        const robloxUsername =
-          String(
-            member.robloxUsername || ""
-          ).trim();
-
-        const rank =
-          String(
-            member.rank || ""
-          ).trim();
-
-        /*
-         * The Discord ID is the permanent identifier in the
-         * Army Master Roster. Do not create an entry without one.
-         */
         if (!discordId) {
           result.skipped += 1;
           continue;
         }
 
-        result.scanned += 1;
-
-        /*
-         * If the same Discord ID somehow appears more than once across
-         * the Grand ORBAT, only the first occurrence is synchronized.
-         * /audit can then be used to investigate the duplicate.
-         */
         if (
-          seenDiscordIds.has(
+          armyMembers.has(
             discordId
           )
         ) {
@@ -2655,54 +2745,215 @@ async function syncAllOrbatsToMasterRoster() {
           continue;
         }
 
-        seenDiscordIds.add(
-          discordId
-        );
-
-        try {
-          const existing =
-            await findMasterRosterMember(
-              discordId
-            );
-
-          const position =
-            getMasterRosterPosition({
-              regiment,
+        armyMembers.set(
+          discordId,
+          {
+            discordId,
+            robloxUsername:
+              String(
+                member.robloxUsername || ""
+              ).trim(),
+            rank:
+              String(
+                member.rank || ""
+              ).trim(),
+            regiment:
+              regiment.displayName,
+            kompanie:
               company,
-              row:
-                member.row
-            });
-
-          const syncResult =
-            await syncMasterRosterMember({
-              discordId,
-              robloxUsername,
-              rank,
-              regiment:
-                regiment.displayName,
-              kompanie:
+            position:
+              getMasterRosterPosition({
+                regiment,
                 company,
-              position,
-              active: "Yes"
-            });
-
-          if (
-            syncResult.created
-          ) {
-            result.added += 1;
-          } else {
-            result.updated += 1;
+                row:
+                  member.row
+              })
           }
-        } catch (error) {
-          result.errors.push(
-            `${robloxUsername || discordId} — ` +
-            `${regiment.displayName} / ${company}: ` +
-            `${error?.message || "Unknown sync error."}`
-          );
-        }
+        );
       }
     }
   }
+
+  result.uniqueDiscordIds =
+    armyMembers.size;
+
+  /*
+   * STEP 3:
+   * Build ALL Master Roster writes in memory.
+   *
+   * Existing members preserve Date Joined Army.
+   * Date of Current Rank changes only if the rank changed.
+   */
+  const today =
+    getCurrentOrbatDate();
+
+  const updates = [];
+
+  for (
+    const member of
+    armyMembers.values()
+  ) {
+    const existing =
+      masterByDiscordId.get(
+        member.discordId
+      );
+
+    if (existing) {
+      const rankChanged =
+        normalizeText(
+          existing.rank
+        ) !==
+        normalizeText(
+          member.rank
+        );
+
+      const rowValues = [
+        member.robloxUsername,
+        member.discordId,
+        member.rank,
+        existing.dateJoined || today,
+        rankChanged
+          ? today
+          : (
+              existing.dateOfCurrentRank ||
+              today
+            ),
+        member.regiment,
+        member.kompanie,
+        member.position,
+        "Yes"
+      ];
+
+      updates.push({
+        range:
+          `${safeMasterSheetName}!B${existing.row}:J${existing.row}`,
+        values: [
+          rowValues
+        ]
+      });
+
+      result.updated += 1;
+      continue;
+    }
+
+    /*
+     * Find the next free row from our local snapshot.
+     * This avoids another Google read for every new member.
+     */
+    while (true) {
+      const index =
+        nextMasterRow -
+        MASTER_ROSTER_FIRST_MEMBER_ROW;
+
+      const snapshotRow =
+        masterRows[index] || [];
+
+      const snapshotDiscordId =
+        String(
+          snapshotRow[1] || ""
+        ).trim();
+
+      const alreadyAssigned =
+        updates.some(
+          update =>
+            update.range ===
+            `${safeMasterSheetName}!B${nextMasterRow}:J${nextMasterRow}`
+        );
+
+      if (
+        !snapshotDiscordId &&
+        !alreadyAssigned
+      ) {
+        break;
+      }
+
+      nextMasterRow += 1;
+    }
+
+    updates.push({
+      range:
+        `${safeMasterSheetName}!B${nextMasterRow}:J${nextMasterRow}`,
+      values: [[
+        member.robloxUsername,
+        member.discordId,
+        member.rank,
+        today,
+        today,
+        member.regiment,
+        member.kompanie,
+        member.position,
+        "Yes"
+      ]]
+    });
+
+    masterByDiscordId.set(
+      member.discordId,
+      {
+        row:
+          nextMasterRow,
+        ...member,
+        dateJoined:
+          today,
+        dateOfCurrentRank:
+          today,
+        active:
+          "Yes"
+      }
+    );
+
+    result.added += 1;
+    nextMasterRow += 1;
+  }
+
+  /*
+   * STEP 4:
+   * Batch write instead of member-by-member writes.
+   * Google accepts many ranges in one values.batchUpdate request.
+   */
+  const BATCH_SIZE = 200;
+
+  for (
+    let index = 0;
+    index < updates.length;
+    index += BATCH_SIZE
+  ) {
+    const batch =
+      updates.slice(
+        index,
+        index + BATCH_SIZE
+      );
+
+    await sheets.spreadsheets.values.batchUpdate({
+      spreadsheetId:
+        MASTER_ROSTER_SPREADSHEET_ID,
+      requestBody: {
+        valueInputOption:
+          "USER_ENTERED",
+        data:
+          batch
+      }
+    });
+  }
+
+  console.log(
+    "[MASTER ROSTER BATCH SYNC]",
+    {
+      found:
+        result.found,
+      uniqueDiscordIds:
+        result.uniqueDiscordIds,
+      added:
+        result.added,
+      updated:
+        result.updated,
+      duplicates:
+        result.duplicates,
+      skipped:
+        result.skipped,
+      errors:
+        result.errors.length
+    }
+  );
 
   return result;
 }
@@ -5617,7 +5868,8 @@ client.on(
         const lines = [
           "**Army Master Roster Synchronization Complete**",
           "",
-          `**Members Scanned:** ${result.scanned}`,
+          `**ORBAT Members Found:** ${result.found}`,
+          `**Unique Discord IDs:** ${result.uniqueDiscordIds}`,
           `**New Members Added:** ${result.added}`,
           `**Existing Members Updated:** ${result.updated}`,
           `**Duplicate Discord IDs Skipped:** ${result.duplicates}`,
