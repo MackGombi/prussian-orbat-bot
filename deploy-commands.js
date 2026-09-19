@@ -62,7 +62,7 @@ const REGIMENT_CHOICES = [
   }
 ];
 
-const PLATOON_POSITION_CHOICES = [
+const SCHUETZEN_POSITION_CHOICES = [
   {
     name: "Company Commander",
     value: "company_commander"
@@ -181,10 +181,10 @@ const commands = [
       option
         .setName("position")
         .setDescription(
-          "Required for Schützen/Jäger companies; not used for Garnison."
+          "Required for Schützen: Commander, 1. Platoon, or 2. Platoon."
         )
         .setRequired(false)
-        .addChoices(...PLATOON_POSITION_CHOICES)
+        .addChoices(...SCHUETZEN_POSITION_CHOICES)
     )
     .toJSON(),
 
@@ -232,30 +232,10 @@ const commands = [
       option
         .setName("new_position")
         .setDescription(
-          "Schützen/Jäger company only; ignored for Garnison."
+          "Required when transferring to Schützen."
         )
         .setRequired(false)
-        .addChoices(...PLATOON_POSITION_CHOICES)
-    )
-    .addStringOption(option =>
-      option
-        .setName("inactivity_duration")
-        .setDescription(
-          "Required only when transferring to Garnison."
-        )
-        .setRequired(false)
-        .setMinLength(1)
-        .setMaxLength(100)
-    )
-    .addStringOption(option =>
-      option
-        .setName("inactivity_reason")
-        .setDescription(
-          "Required only when transferring to Garnison."
-        )
-        .setRequired(false)
-        .setMinLength(1)
-        .setMaxLength(300)
+        .addChoices(...SCHUETZEN_POSITION_CHOICES)
     )
     .toJSON(),
 
@@ -493,6 +473,13 @@ const commands = [
     .toJSON(),
 
   new SlashCommandBuilder()
+    .setName("syncmasterroster")
+    .setDescription(
+      "Imports all current ORBAT members into the Army Master Roster."
+    )
+    .toJSON(),
+
+  new SlashCommandBuilder()
     .setName("attendance")
     .setDescription(
       "Starts a multi-member company attendance entry."
@@ -525,7 +512,7 @@ const rest = new REST({
 async function deployCommands() {
   try {
     console.log(
-      "Registering ORBAT commands including /roster, /strength, /attendanceview, /audit, /getsheet, and existing commands..."
+      "Registering ORBAT commands including /syncmasterroster and existing commands..."
     );
 
     await rest.put(
