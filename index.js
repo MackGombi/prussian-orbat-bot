@@ -5577,6 +5577,135 @@ client.on(
       return;
     }
 
+    /*
+     * Handle /syncmasterroster FIRST.
+     *
+     * This intentionally sits immediately after the ChatInputCommand guard
+     * so no other command-routing logic can intercept the interaction before
+     * Discord receives an acknowledgement.
+     */
+    if (
+      interaction.commandName ===
+      "syncmasterroster"
+    ) {
+      console.log(
+        "[SYNC MASTER ROSTER] Handler entered"
+      );
+
+      try {
+        await interaction.deferReply({
+          flags:
+            MessageFlags.Ephemeral
+        });
+
+        console.log(
+          "[SYNC MASTER ROSTER] Reply deferred"
+        );
+
+        console.log(
+          "[SYNC MASTER ROSTER] Starting ORBAT scan"
+        );
+
+        const result =
+          await syncAllOrbatsToMasterRoster();
+
+        console.log(
+          "[SYNC MASTER ROSTER] Scan completed",
+          result
+        );
+
+        const lines = [
+          "**Army Master Roster Synchronization Complete**",
+          "",
+          `**Members Scanned:** ${result.scanned}`,
+          `**New Members Added:** ${result.added}`,
+          `**Existing Members Updated:** ${result.updated}`,
+          `**Duplicate Discord IDs Skipped:** ${result.duplicates}`,
+          `**Members Without Discord IDs Skipped:** ${result.skipped}`,
+          `**Errors:** ${result.errors.length}`
+        ];
+
+        if (
+          result.errors.length > 0
+        ) {
+          lines.push(
+            "",
+            "**First Errors:**",
+            ...result.errors
+              .slice(0, 8)
+              .map(
+                error =>
+                  `• ${error}`
+              )
+          );
+
+          if (
+            result.errors.length > 8
+          ) {
+            lines.push(
+              `• …and ${result.errors.length - 8} more error(s). Check Railway logs for the full list.`
+            );
+          }
+
+          console.error(
+            "[SYNC MASTER ROSTER] ERRORS:",
+            result.errors
+          );
+        }
+
+        await interaction.editReply(
+          lines
+            .join("\n")
+            .slice(0, 1950)
+        );
+
+        console.log(
+          "[SYNC MASTER ROSTER] Discord response sent"
+        );
+
+        return;
+      } catch (error) {
+        console.error(
+          "[SYNC MASTER ROSTER] FAILED:"
+        );
+        console.error(error);
+
+        try {
+          if (
+            interaction.deferred ||
+            interaction.replied
+          ) {
+            await interaction.editReply(
+              [
+                "The Army Master Roster synchronization failed.",
+                "",
+                `**Error:** ${error?.message || "Unknown error."}`,
+                "",
+                "No ORBAT members were removed by this command. Check the Railway logs for details."
+              ].join("\n")
+            );
+          } else {
+            await interaction.reply({
+              content: [
+                "The Army Master Roster synchronization failed.",
+                "",
+                `**Error:** ${error?.message || "Unknown error."}`
+              ].join("\n"),
+              flags:
+                MessageFlags.Ephemeral
+            });
+          }
+        } catch (replyError) {
+          console.error(
+            "[SYNC MASTER ROSTER] Failed to send error response:"
+          );
+          console.error(replyError);
+        }
+
+        return;
+      }
+    }
+
     if (
       interaction.commandName !== "addmember" &&
       interaction.commandName !== "removemember" &&
@@ -5752,85 +5881,6 @@ client.on(
       }
     }
 
-
-    if (
-      interaction.commandName ===
-      "syncmasterroster"
-    ) {
-      try {
-        await interaction.deferReply({
-          flags:
-            MessageFlags.Ephemeral
-        });
-
-        const result =
-          await syncAllOrbatsToMasterRoster();
-
-        const lines = [
-          "**Army Master Roster Synchronization Complete**",
-          "",
-          `**Members Scanned:** ${result.scanned}`,
-          `**New Members Added:** ${result.added}`,
-          `**Existing Members Updated:** ${result.updated}`,
-          `**Duplicate Discord IDs Skipped:** ${result.duplicates}`,
-          `**Members Without Discord IDs Skipped:** ${result.skipped}`,
-          `**Errors:** ${result.errors.length}`
-        ];
-
-        if (
-          result.errors.length > 0
-        ) {
-          lines.push(
-            "",
-            "**First Errors:**",
-            ...result.errors
-              .slice(0, 8)
-              .map(
-                error =>
-                  `• ${error}`
-              )
-          );
-
-          if (
-            result.errors.length > 8
-          ) {
-            lines.push(
-              `• …and ${result.errors.length - 8} more error(s). Check Railway logs for the full list.`
-            );
-          }
-
-          console.error(
-            "MASTER ROSTER SYNC ERRORS:",
-            result.errors
-          );
-        }
-
-        await interaction.editReply(
-          lines
-            .join("\n")
-            .slice(0, 1950)
-        );
-
-        return;
-      } catch (error) {
-        console.error(
-          "Failed to synchronize Army Master Roster:"
-        );
-        console.error(error);
-
-        await interaction.editReply(
-          [
-            "The Army Master Roster synchronization failed.",
-            "",
-            `**Error:** ${error?.message || "Unknown error."}`,
-            "",
-            "No ORBAT members were removed by this command. Check the Railway logs for details."
-          ].join("\n")
-        );
-
-        return;
-      }
-    }
 
     if (interaction.commandName === "strength") {
       try {
