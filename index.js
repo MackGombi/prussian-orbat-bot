@@ -4080,7 +4080,8 @@ async function getMemberRecord({
     escapeSheetName(sheetName);
 
   const {
-    timezoneColumn
+    timezoneColumn,
+    storageColumn
   } = getTimezoneColumnLayout(
     sheetName,
     spreadsheetId
@@ -4094,7 +4095,8 @@ async function getMemberRecord({
 
   const ranges = [
     `${safeSheetName}!C${row}:E${row}`,
-    `${safeSheetName}!${timezoneColumn}${row}`
+    `${safeSheetName}!${timezoneColumn}${row}`,
+    `${safeSheetName}!${storageColumn}${row}`
   ];
 
   if (strikeColumn) {
@@ -4114,6 +4116,9 @@ async function getMemberRecord({
 
   const timezoneValue =
     response.data.valueRanges?.[1]?.values?.[0]?.[0] || "";
+
+  const timezoneStorageValue =
+    response.data.valueRanges?.[3]?.values?.[0]?.[0] || "";
 
   const discordId =
     String(identity[1] || "").trim();
@@ -4159,7 +4164,9 @@ async function getMemberRecord({
       String(identity[2] || "").trim(),
     strikes,
     timezone:
-      String(timezoneValue || "").trim()
+      String(timezoneValue || "").trim(),
+    timezoneStorage:
+      String(timezoneStorageValue || "").trim()
   };
 }
 
@@ -8890,6 +8897,58 @@ client.on(
             discordMember.id;
         }
 
+        /*
+         * TRANSFER STRIKE PRESERVATION
+         *
+         * Strike History is authoritative because Krümper and Garnison do
+         * not display strikes on their ORBAT sheets. If history exists,
+         * carry that total to the destination. If this is an older member
+         * with no history yet, fall back to the source ORBAT strike value.
+         */
+        const transferStrikeHistory =
+          await getStrikeHistory(
+            discordMember.id
+          );
+
+        const transferStrikeTotal =
+          transferStrikeHistory.length > 0
+            ? calculateStrikeTotal(
+                transferStrikeHistory
+              )
+            : Math.max(
+                0,
+                Math.min(
+                  MAX_STRIKES,
+                  Number.parseInt(
+                    String(
+                      memberRecord.strikes || "0"
+                    ),
+                    10
+                  ) || 0
+                )
+              );
+
+        memberRecord.strikes =
+          transferStrikeTotal;
+
+        console.log(
+          "[TRANSFER MEMBER DATA]",
+          {
+            discordId:
+              discordMember.id,
+            sourceCompany:
+              existingMember.companyName,
+            destinationCompany:
+              matchedCompany,
+            strikes:
+              transferStrikeTotal,
+            timezone:
+              memberRecord.timezone,
+            timezoneStorage:
+              memberRecord.timezoneStorage
+          }
+        );
+
         const previousRank =
           String(memberRecord.rank || "").trim();
 
@@ -9223,9 +9282,54 @@ client.on(
 
         let timezoneWarning = null;
 
-        if (memberRecord.timezone) {
+        if (
+          memberRecord.timezone ||
+          memberRecord.timezoneStorage
+        ) {
           try {
-            await processTimezoneWithAppsScript({
+            /*
+             * Prefer the hidden canonical timezone when available.
+             * This avoids reparsing an abbreviation such as PST/PDT/EST.
+             */
+            const storedTimezone =
+              String(
+                memberRecord.timezoneStorage || ""
+              ).trim();
+
+            const timezoneForProcessing =
+              storedTimezone.startsWith("IANA:")
+                ? storedTimezone.substring(5)
+                : storedTimezone.startsWith("OFFSET:")
+                  ? storedTimezone.substring(7)
+                  : (
+                      storedTimezone ||
+                      memberRecord.timezone
+                    );
+
+            const timezoneResult =
+              await processTimezoneWithAppsScript({
+                spreadsheetId:
+                  newRegiment.spreadsheetId,
+                sheetName:
+                  matchedCompany,
+                row:
+                  destinationRow,
+                timezone:
+                  timezoneForProcessing,
+                strikes:
+                  memberRecord.strikes
+              });
+
+            /*
+             * Enforce the DESTINATION layout after Apps Script:
+             *
+             * Krümper/Garnison:
+             *   F = timezone, G = storage, no displayed strikes
+             *
+             * All other companies:
+             *   F = strikes, G = timezone, H = storage
+             */
+            await enforceOrbatTimezoneLayout({
               spreadsheetId:
                 newRegiment.spreadsheetId,
               sheetName:
@@ -9233,10 +9337,34 @@ client.on(
               row:
                 destinationRow,
               timezone:
+                timezoneResult?.displayValue ||
                 memberRecord.timezone,
-              strikes:
-                memberRecord.strikes
+              ianaTimezone:
+                timezoneResult?.storageValue ||
+                memberRecord.timezoneStorage ||
+                ""
             });
+
+            console.log(
+              "[TRANSFER DESTINATION LAYOUT ENFORCED]",
+              {
+                discordId:
+                  discordMember.id,
+                company:
+                  matchedCompany,
+                row:
+                  destinationRow,
+                strikes:
+                  memberRecord.strikes,
+                timezone:
+                  timezoneResult?.displayValue ||
+                  memberRecord.timezone,
+                storage:
+                  timezoneResult?.storageValue ||
+                  memberRecord.timezoneStorage ||
+                  ""
+              }
+            );
           } catch (webhookError) {
             console.error(
               "Transfer completed, but timezone processing failed:"
@@ -9246,6 +9374,63 @@ client.on(
             timezoneWarning =
               webhookError?.message ||
               "The Apps Script webhook failed.";
+
+            /*
+             * Even if Apps Script is unavailable, keep the destination
+             * sheet structurally correct using the values we already read
+             * from the source ORBAT.
+             */
+            try {
+              await enforceOrbatTimezoneLayout({
+                spreadsheetId:
+                  newRegiment.spreadsheetId,
+                sheetName:
+                  matchedCompany,
+                row:
+                  destinationRow,
+                timezone:
+                  memberRecord.timezone,
+                ianaTimezone:
+                  memberRecord.timezoneStorage ||
+                  ""
+              });
+            } catch (layoutError) {
+              console.error(
+                "Transfer destination layout fallback failed:"
+              );
+              console.error(layoutError);
+            }
+          }
+        } else {
+          /*
+           * There is no timezone to process, but strike-enabled destination
+           * sheets must still receive the preserved strike total in F.
+           */
+          const destinationStrikeColumn =
+            getStrikeColumn(
+              matchedCompany,
+              newRegiment.spreadsheetId
+            );
+
+          if (destinationStrikeColumn) {
+            const safeDestinationSheet =
+              escapeSheetName(
+                matchedCompany
+              );
+
+            await sheets.spreadsheets.values.update({
+              spreadsheetId:
+                newRegiment.spreadsheetId,
+              range:
+                `${safeDestinationSheet}!${destinationStrikeColumn}${destinationRow}`,
+              valueInputOption:
+                "RAW",
+              requestBody: {
+                values: [[
+                  memberRecord.strikes
+                ]]
+              }
+            });
           }
         }
 
@@ -9339,6 +9524,7 @@ client.on(
           `**Previous Rank:** ${previousRank || "Not set"}`,
           `**New Rank:** ${finalRank || "Not set"}`,
           `**Timezone:** ${memberRecord.timezone || "Not set"}`,
+          `**Strikes Carried:** ${memberRecord.strikes} / ${MAX_STRIKES}`,
           "",
           `**From Regiment:** ${existingMember.regiment.displayName}`,
           `**From Company:** ${existingMember.companyName}`,
