@@ -704,19 +704,67 @@ const RANK_SORT_PRIORITY = new Map([
   ["rekrut", 17]
 ]);
 
+function getOrbatColumnLayout(
+  sheetName,
+  spreadsheetId = null
+) {
+  const normalized =
+    normalizeText(sheetName);
+
+  /*
+   * Krümper + Garnison:
+   *   F = visible timezone
+   *   G = hidden/internal IANA timezone storage
+   *   strikes are NOT displayed on the ORBAT
+   *
+   * All other ORBAT sheets:
+   *   F = current strike total
+   *   G = visible timezone
+   *   H = hidden/internal IANA timezone storage
+   */
+  const hidesStrikes =
+    normalized.includes("krumper") ||
+    normalized.includes("garnison");
+
+  if (hidesStrikes) {
+    return {
+      strikeColumn: null,
+      timezoneColumn: "F",
+      storageColumn: "G"
+    };
+  }
+
+  return {
+    strikeColumn: "F",
+    timezoneColumn: "G",
+    storageColumn: "H"
+  };
+}
+
 function getTimezoneColumnLayout(
   sheetName,
   spreadsheetId = null
 ) {
-  /*
-   * Column F is reserved for the Army strike total on every ORBAT.
-   * Timezone display is therefore G and the hidden/internal IANA
-   * timezone storage is H on every supported ORBAT sheet.
-   */
+  const layout =
+    getOrbatColumnLayout(
+      sheetName,
+      spreadsheetId
+    );
+
   return {
-    timezoneColumn: "G",
-    storageColumn: "H"
+    timezoneColumn: layout.timezoneColumn,
+    storageColumn: layout.storageColumn
   };
+}
+
+function getStrikeColumn(
+  sheetName,
+  spreadsheetId = null
+) {
+  return getOrbatColumnLayout(
+    sheetName,
+    spreadsheetId
+  ).strikeColumn;
 }
 
 function isRekrutRank(rank) {
@@ -1137,36 +1185,68 @@ async function getCompanyAuditRows({
     escapeSheetName(sheetName);
 
   const lastMemberRow =
-    getLastMemberRow(sheetName);
+    getLastMemberRowForSpreadsheet(
+      spreadsheetId,
+      sheetName
+    );
 
-  const response =
+  const {
+    timezoneColumn
+  } = getTimezoneColumnLayout(
+    sheetName,
+    spreadsheetId
+  );
+
+  const identityResponse =
     await sheets.spreadsheets.values.get({
       spreadsheetId,
       range:
-        `${safeSheetName}!C${FIRST_MEMBER_ROW}:F${lastMemberRow}`,
+        `${safeSheetName}!C${FIRST_MEMBER_ROW}:E${lastMemberRow}`,
       majorDimension: "ROWS"
     });
 
-  return (response.data.values || [])
-    .map((row, index) => ({
+  const timezoneResponse =
+    await sheets.spreadsheets.values.get({
+      spreadsheetId,
+      range:
+        `${safeSheetName}!${timezoneColumn}${FIRST_MEMBER_ROW}:` +
+        `${timezoneColumn}${lastMemberRow}`,
+      majorDimension: "ROWS"
+    });
+
+  const identityRows =
+    identityResponse.data.values || [];
+
+  const timezoneRows =
+    timezoneResponse.data.values || [];
+
+  const rowCount =
+    Math.max(
+      identityRows.length,
+      timezoneRows.length
+    );
+
+  return Array.from(
+    { length: rowCount },
+    (_, index) => ({
       robloxUsername:
-        String(row?.[0] || "").trim(),
+        String(identityRows[index]?.[0] || "").trim(),
       discordId:
-        String(row?.[1] || "").trim(),
+        String(identityRows[index]?.[1] || "").trim(),
       rank:
-        String(row?.[2] || "").trim(),
+        String(identityRows[index]?.[2] || "").trim(),
       timezone:
-        String(row?.[3] || "").trim(),
+        String(timezoneRows[index]?.[0] || "").trim(),
       row:
         FIRST_MEMBER_ROW + index
-    }))
-    .filter(
-      member =>
-        member.robloxUsername ||
-        member.discordId ||
-        member.rank ||
-        member.timezone
-    );
+    })
+  ).filter(
+    member =>
+      member.robloxUsername ||
+      member.discordId ||
+      member.rank ||
+      member.timezone
+  );
 }
 
 async function auditOrbatRegiments(
@@ -1575,9 +1655,9 @@ async function sortGarnisonByRank({
    *   C = Name
    *   D = Discord ID
    *   E = Rank
-   *   F = reserved/unchanged
-   *   G = Timezone
-   *   H = internal timezone storage
+   *   F = Timezone
+   *   G = internal timezone storage
+   *   strikes are not displayed on Garnison
    *   I = Date Added
    *   J:M = Duration of Inactivity (merged; J is the writable anchor)
    *   N:O = Reason for Inactivity (merged; N is the writable anchor)
@@ -3383,7 +3463,7 @@ async function findMemberByDiscordId(discordId) {
 | Strike system
 |--------------------------------------------------------------------------
 |
-| ORBAT Column F = current strike total (0-10).
+| ORBAT Column F = current strike total (0-10) except Krümper/Garnison, where strikes are not displayed.
 |
 | Strike History is stored in the Army Master Roster spreadsheet so that
 | reasons, issuers, removals, and automatic weekly reductions survive
@@ -3745,6 +3825,31 @@ async function writeMemberStrikeTotal({
   existingMember,
   total
 }) {
+  const strikeColumn =
+    getStrikeColumn(
+      existingMember.companyName,
+      existingMember.regiment.spreadsheetId
+    );
+
+  /*
+   * Krümper and Garnison do not display strikes on their ORBAT.
+   * Strike history/current total remains in the Master Roster
+   * and is still shown by /memberinfo.
+   */
+  if (!strikeColumn) {
+    console.log(
+      "ORBAT STRIKE DISPLAY SKIPPED:",
+      {
+        company:
+          existingMember.companyName,
+        discordId:
+          existingMember.discordId,
+        total
+      }
+    );
+    return;
+  }
+
   const safeSheetName =
     escapeSheetName(
       existingMember.companyName
@@ -3754,7 +3859,7 @@ async function writeMemberStrikeTotal({
     spreadsheetId:
       existingMember.regiment.spreadsheetId,
     range:
-      `${safeSheetName}!F${existingMember.row}`,
+      `${safeSheetName}!${strikeColumn}${existingMember.row}`,
     valueInputOption:
       "RAW",
     requestBody: {
@@ -3971,35 +4076,90 @@ async function getMemberRecord({
   sheetName,
   row
 }) {
-  const safeSheetName = escapeSheetName(sheetName);
-  const { timezoneColumn } = getTimezoneColumnLayout(sheetName, spreadsheetId);
+  const safeSheetName =
+    escapeSheetName(sheetName);
 
-  const response = await sheets.spreadsheets.values.batchGet({
-    spreadsheetId,
-    ranges: [
-      `${safeSheetName}!C${row}:F${row}`,
-      `${safeSheetName}!${timezoneColumn}${row}`
-    ]
-  });
+  const {
+    timezoneColumn
+  } = getTimezoneColumnLayout(
+    sheetName,
+    spreadsheetId
+  );
 
-  const identity = response.data.valueRanges?.[0]?.values?.[0] || [];
-  const timezoneValue = response.data.valueRanges?.[1]?.values?.[0]?.[0] || "";
+  const strikeColumn =
+    getStrikeColumn(
+      sheetName,
+      spreadsheetId
+    );
+
+  const ranges = [
+    `${safeSheetName}!C${row}:E${row}`,
+    `${safeSheetName}!${timezoneColumn}${row}`
+  ];
+
+  if (strikeColumn) {
+    ranges.push(
+      `${safeSheetName}!${strikeColumn}${row}`
+    );
+  }
+
+  const response =
+    await sheets.spreadsheets.values.batchGet({
+      spreadsheetId,
+      ranges
+    });
+
+  const identity =
+    response.data.valueRanges?.[0]?.values?.[0] || [];
+
+  const timezoneValue =
+    response.data.valueRanges?.[1]?.values?.[0]?.[0] || "";
+
+  const discordId =
+    String(identity[1] || "").trim();
+
+  let strikes = 0;
+
+  if (strikeColumn) {
+    strikes =
+      Math.max(
+        0,
+        Math.min(
+          MAX_STRIKES,
+          Number.parseInt(
+            String(
+              response.data.valueRanges?.[2]?.values?.[0]?.[0] ||
+              "0"
+            ),
+            10
+          ) || 0
+        )
+      );
+  } else if (discordId) {
+    /*
+     * Hidden-strike sheets get the authoritative total from
+     * Master Roster Strike History instead of reading column F.
+     */
+    const history =
+      await getStrikeHistory(
+        discordId
+      );
+
+    strikes =
+      calculateStrikeTotal(
+        history
+      );
+  }
 
   return {
-    robloxUsername: String(identity[0] || "").trim(),
-    discordId: String(identity[1] || "").trim(),
-    rank: String(identity[2] || "").trim(),
-    strikes: Math.max(
-      0,
-      Math.min(
-        10,
-        Number.parseInt(
-          String(identity[3] || "0"),
-          10
-        ) || 0
-      )
-    ),
-    timezone: String(timezoneValue || "").trim()
+    robloxUsername:
+      String(identity[0] || "").trim(),
+    discordId,
+    rank:
+      String(identity[2] || "").trim(),
+    strikes,
+    timezone:
+      String(timezoneValue || "").trim()
   };
 }
 
@@ -4076,42 +4236,78 @@ async function removeMemberFromSheet({
   sheetName,
   row
 }) {
-  const safeSheetName = escapeSheetName(sheetName);
-  const { timezoneColumn, storageColumn } = getTimezoneColumnLayout(sheetName, spreadsheetId);
+  const safeSheetName =
+    escapeSheetName(sheetName);
 
-  const ranges = isGarnisonCompany(sheetName)
-    ? [`${safeSheetName}!C${row}:O${row}`]
-    : [
-        `${safeSheetName}!C${row}`,
-        `${safeSheetName}!D${row}`,
-        `${safeSheetName}!E${row}`,
-        `${safeSheetName}!F${row}`,
-        `${safeSheetName}!${timezoneColumn}${row}`,
-        `${safeSheetName}!${storageColumn}${row}`
-      ];
+  const {
+    timezoneColumn,
+    storageColumn
+  } = getTimezoneColumnLayout(
+    sheetName,
+    spreadsheetId
+  );
+
+  const strikeColumn =
+    getStrikeColumn(
+      sheetName,
+      spreadsheetId
+    );
+
+  const ranges =
+    isGarnisonCompany(sheetName)
+      ? [
+          `${safeSheetName}!C${row}:O${row}`
+        ]
+      : [
+          `${safeSheetName}!C${row}`,
+          `${safeSheetName}!D${row}`,
+          `${safeSheetName}!E${row}`,
+          ...(strikeColumn
+            ? [`${safeSheetName}!${strikeColumn}${row}`]
+            : []),
+          `${safeSheetName}!${timezoneColumn}${row}`,
+          `${safeSheetName}!${storageColumn}${row}`
+        ];
 
   if (!isGarnisonCompany(sheetName)) {
     if (isFirstKrumperCompany(sheetName)) {
-      ranges.push(`${safeSheetName}!I${row}`);
-    } else if (isSecondKrumperCompany(sheetName)) {
-      ranges.push(`${safeSheetName}!I${row}:J${row}`);
-    } else if (!isAttendanceExcludedCompany(sheetName)) {
-      ranges.push(`${safeSheetName}!I${row}:O${row}`);
+      ranges.push(
+        `${safeSheetName}!I${row}`
+      );
+    } else if (
+      isSecondKrumperCompany(sheetName)
+    ) {
+      ranges.push(
+        `${safeSheetName}!I${row}:J${row}`
+      );
+    } else if (
+      !isAttendanceExcludedCompany(sheetName)
+    ) {
+      ranges.push(
+        `${safeSheetName}!I${row}:O${row}`
+      );
     }
   }
 
   await sheets.spreadsheets.values.batchClear({
     spreadsheetId,
-    requestBody: { ranges }
+    requestBody: {
+      ranges: [...new Set(ranges)]
+    }
   });
 
-  console.log("ORBAT ROW CLEARED:", {
-    sheetName,
-    row,
-    timezoneColumn,
-    storageColumn,
-    clearedRanges: ranges
-  });
+  console.log(
+    "ORBAT ROW CLEARED:",
+    {
+      sheetName,
+      row,
+      strikeColumn,
+      timezoneColumn,
+      storageColumn,
+      clearedRanges:
+        [...new Set(ranges)]
+    }
+  );
 }
 
 async function writeGarnisonInactivity({
@@ -4270,8 +4466,22 @@ async function addMemberToSheet({
       });
   }
 
-  const safeSheetName = escapeSheetName(sheetName);
-  const { timezoneColumn, storageColumn } = getTimezoneColumnLayout(sheetName, spreadsheetId);
+  const safeSheetName =
+    escapeSheetName(sheetName);
+
+  const {
+    timezoneColumn,
+    storageColumn
+  } = getTimezoneColumnLayout(
+    sheetName,
+    spreadsheetId
+  );
+
+  const strikeColumn =
+    getStrikeColumn(
+      sheetName,
+      spreadsheetId
+    );
 
   const writeData = [
     {
@@ -4287,21 +4497,6 @@ async function addMemberToSheet({
       values: [[rank]]
     },
     {
-      range: `${safeSheetName}!F${row}`,
-      values: [[
-        Math.max(
-          0,
-          Math.min(
-            10,
-            Number.parseInt(
-              String(strikes || "0"),
-              10
-            ) || 0
-          )
-        )
-      ]]
-    },
-    {
       range: `${safeSheetName}!${timezoneColumn}${row}`,
       values: [[timezone]]
     },
@@ -4310,6 +4505,25 @@ async function addMemberToSheet({
       values: [[""]]
     }
   ];
+
+  if (strikeColumn) {
+    writeData.push({
+      range:
+        `${safeSheetName}!${strikeColumn}${row}`,
+      values: [[
+        Math.max(
+          0,
+          Math.min(
+            MAX_STRIKES,
+            Number.parseInt(
+              String(strikes || "0"),
+              10
+            ) || 0
+          )
+        )
+      ]]
+    });
+  }
 
   /*
    * Write the Krümper entry date in the SAME Google Sheets request as
@@ -7532,7 +7746,12 @@ client.on(
             `**Previous Total:** ${before.total} / ${MAX_STRIKES}`,
             `**New Total:** ${afterTotal} / ${MAX_STRIKES}`,
             `**ORBAT:** ${existingMember.regiment.displayName} — ${existingMember.companyName}`,
-            `**Column F:** F${existingMember.row}`
+            getStrikeColumn(
+              existingMember.companyName,
+              existingMember.regiment.spreadsheetId
+            )
+              ? `**Strike Column:** F${existingMember.row}`
+              : "**Strike Column:** Not displayed on Krümper/Garnison ORBAT"
           ].join("\n")
         );
 
