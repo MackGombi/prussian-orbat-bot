@@ -4636,6 +4636,29 @@ async function enforceOrbatTimezoneLayout({
   const safeSheetName = escapeSheetName(sheetName);
   const layout = getOrbatColumnLayout(sheetName, spreadsheetId);
 
+  /*
+   * Apps Script returns storage values as:
+   *   IANA:America/Los_Angeles
+   *   OFFSET:-08:00
+   *
+   * Keep those prefixes because refreshAllTimezones() relies on them.
+   * If an unprefixed IANA timezone reaches this safeguard, normalize it.
+   */
+  const rawStorageValue =
+    String(ianaTimezone || "").trim();
+
+  const timezoneStorageValue =
+    rawStorageValue === ""
+      ? ""
+      : (
+          rawStorageValue.startsWith("IANA:") ||
+          rawStorageValue.startsWith("OFFSET:")
+        )
+          ? rawStorageValue
+          : rawStorageValue.includes("/")
+            ? `IANA:${rawStorageValue}`
+            : rawStorageValue;
+
   if (!layout.strikeColumn) {
     await sheets.spreadsheets.values.batchUpdate({
       spreadsheetId,
@@ -4648,7 +4671,7 @@ async function enforceOrbatTimezoneLayout({
           },
           {
             range: `${safeSheetName}!${layout.storageColumn}${row}`,
-            values: [[ianaTimezone]]
+            values: [[timezoneStorageValue]]
           }
         ]
       }
@@ -4698,7 +4721,7 @@ async function enforceOrbatTimezoneLayout({
         },
         {
           range: `${safeSheetName}!${layout.storageColumn}${row}`,
-          values: [[ianaTimezone]]
+          values: [[timezoneStorageValue]]
         }
       ]
     }
@@ -10706,10 +10729,11 @@ client.on(
         spreadsheetId: regiment.spreadsheetId,
         sheetName: matchedCompany,
         row,
-        timezone,
+        timezone:
+          timezoneResult?.displayValue ||
+          timezone,
         ianaTimezone:
-          timezoneResult?.ianaTimezone ||
-          timezoneResult?.timezone ||
+          timezoneResult?.storageValue ||
           ""
       });
 
