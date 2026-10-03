@@ -704,6 +704,63 @@ const RANK_SORT_PRIORITY = new Map([
   ["rekrut", 17]
 ]);
 
+function getTimezoneColumnLayout(
+  sheetName,
+  spreadsheetId = null
+) {
+  const normalizedSheet =
+    normalizeText(sheetName);
+
+  const normalizedSpreadsheetId =
+    String(
+      spreadsheetId || ""
+    ).trim();
+
+  /*
+   * Timezone layouts now mirror the current Apps Script layouts.
+   *
+   * 11. Erstes Schlesisches:
+   *   - 1. Krümper-Kompanie = F display / G IANA storage
+   *   - 2. Krümper-Kompanie = F display / G IANA storage
+   *   - Garnison Kompanie   = F display / G IANA storage
+   *   - Generalstab and normal line companies = G display / H storage
+   *
+   * 6. Westpreußisches, Jäger, and Schützen:
+   *   - G display / H IANA storage
+   *
+   * spreadsheetId is required to distinguish the repeated Krümper/Garnison
+   * sheet names between regiments.
+   */
+  const isErstesSchlesisches =
+    normalizedSpreadsheetId ===
+    String(
+      ERSTESSCHLESISCHES_SPREADSHEET_ID || ""
+    ).trim();
+
+  const isLegacySchlesischesTimezoneSheet =
+    normalizedSheet ===
+      normalizeText("1. Krümper-Kompanie") ||
+    normalizedSheet ===
+      normalizeText("2. Krümper-Kompanie") ||
+    normalizedSheet ===
+      normalizeText("Garnison Kompanie");
+
+  if (
+    isErstesSchlesisches &&
+    isLegacySchlesischesTimezoneSheet
+  ) {
+    return {
+      timezoneColumn: "F",
+      storageColumn: "G"
+    };
+  }
+
+  return {
+    timezoneColumn: "G",
+    storageColumn: "H"
+  };
+}
+
 function isRekrutRank(rank) {
   return normalizeText(rank) === "rekrut";
 }
@@ -745,7 +802,7 @@ async function writeKrumperEntryDate({
   await sheets.spreadsheets.values.update({
     spreadsheetId,
     range:
-      `${safeSheetName}!H${row}`,
+      `${safeSheetName}!I${row}`,
     valueInputOption: "RAW",
     requestBody: {
       values: [[dateValue]]
@@ -805,18 +862,18 @@ const ATTENDANCE_DAYS = [
 ];
 
 const STANDARD_ATTENDANCE_COLUMNS = new Map([
-  ["monday", "H"],
-  ["tuesday", "I"],
-  ["wednesday", "J"],
-  ["thursday", "K"],
-  ["friday", "L"],
-  ["saturday", "M"],
-  ["sunday", "N"]
+  ["monday", "I"],
+  ["tuesday", "J"],
+  ["wednesday", "K"],
+  ["thursday", "L"],
+  ["friday", "M"],
+  ["saturday", "N"],
+  ["sunday", "O"]
 ]);
 
 const SECOND_KRUMPER_ATTENDANCE_COLUMNS = new Map([
-  ["saturday", "H"],
-  ["sunday", "I"]
+  ["saturday", "I"],
+  ["sunday", "J"]
 ]);
 
 /*
@@ -906,7 +963,7 @@ async function getMemberAttendanceSummary({
   if (isFirstKrumperCompany(sheetName)) {
     const response = await sheets.spreadsheets.values.get({
       spreadsheetId,
-      range: `${safeSheetName}!H${row}`
+      range: `${safeSheetName}!I${row}`
     });
     const entryDate = String(response.data.values?.[0]?.[0] || "").trim();
     return { lines: [`**Entry Date:** ${entryDate || "Blank"}`] };
@@ -919,7 +976,7 @@ async function getMemberAttendanceSummary({
   if (isSecondKrumperCompany(sheetName)) {
     const response = await sheets.spreadsheets.values.get({
       spreadsheetId,
-      range: `${safeSheetName}!H${row}:I${row}`
+      range: `${safeSheetName}!I${row}:J${row}`
     });
     const values = response.data.values?.[0] || [];
     return {
@@ -932,7 +989,7 @@ async function getMemberAttendanceSummary({
 
   const response = await sheets.spreadsheets.values.get({
     spreadsheetId,
-    range: `${safeSheetName}!H${row}:N${row}`
+    range: `${safeSheetName}!I${row}:O${row}`
   });
   const values = response.data.values?.[0] || [];
   return {
@@ -1403,18 +1460,18 @@ function getSortLastColumn(sheetName) {
    * I:L and M:N are merged inactivity fields.
    */
   if (isFirstKrumperCompany(sheetName)) {
-    return "H";
-  }
-
-  if (isSecondKrumperCompany(sheetName)) {
     return "I";
   }
 
-  if (isAttendanceExcludedCompany(sheetName)) {
-    return "G";
+  if (isSecondKrumperCompany(sheetName)) {
+    return "J";
   }
 
-  return "N";
+  if (isAttendanceExcludedCompany(sheetName)) {
+    return getTimezoneColumnLayout(sheetName).storageColumn;
+  }
+
+  return "O";
 }
 
 function columnLetterToNumber(column) {
@@ -1560,11 +1617,12 @@ async function sortGarnisonByRank({
    *   C = Name
    *   D = Discord ID
    *   E = Rank
-   *   F = Timezone
-   *   G = internal timezone storage
-   *   H = Date Added
-   *   I:L = Duration of Inactivity (merged; I is the writable anchor)
-   *   M:N = Reason for Inactivity (merged; M is the writable anchor)
+   *   F = reserved/unchanged
+   *   G = Timezone
+   *   H = internal timezone storage
+   *   I = Date Added
+   *   J:M = Duration of Inactivity (merged; J is the writable anchor)
+   *   N:O = Reason for Inactivity (merged; N is the writable anchor)
    *
    * Read the merged-field anchors separately. Writing C:N as one block can
    * fail because Google Sheets does not allow partial writes through merged
@@ -1575,9 +1633,9 @@ async function sortGarnisonByRank({
     await sheets.spreadsheets.values.batchGet({
       spreadsheetId,
       ranges: [
-        `${safeSheetName}!C${firstRow}:H${lastRow}`,
-        `${safeSheetName}!I${firstRow}:I${lastRow}`,
-        `${safeSheetName}!M${firstRow}:M${lastRow}`
+        `${safeSheetName}!C${firstRow}:I${lastRow}`,
+        `${safeSheetName}!J${firstRow}:J${lastRow}`,
+        `${safeSheetName}!N${firstRow}:N${lastRow}`
       ],
       majorDimension: "ROWS"
     });
@@ -1595,7 +1653,7 @@ async function sortGarnisonByRank({
       (_, index) => {
         const core =
           Array.from(
-            { length: 6 },
+            { length: 7 },
             (_, columnIndex) =>
               coreRows[index]?.[columnIndex] ?? ""
           );
@@ -1645,7 +1703,7 @@ async function sortGarnisonByRank({
       { length: slotCount },
       (_, index) =>
         members[index]?.core ||
-        Array(6).fill("")
+        Array(7).fill("")
     );
 
   const rewrittenInactivity =
@@ -1671,19 +1729,19 @@ async function sortGarnisonByRank({
       data: [
         {
           range:
-            `${safeSheetName}!C${firstRow}:H${lastRow}`,
+            `${safeSheetName}!C${firstRow}:I${lastRow}`,
           values:
             rewrittenCore
         },
         {
           range:
-            `${safeSheetName}!I${firstRow}:I${lastRow}`,
+            `${safeSheetName}!J${firstRow}:J${lastRow}`,
           values:
             rewrittenInactivity
         },
         {
           range:
-            `${safeSheetName}!M${firstRow}:M${lastRow}`,
+            `${safeSheetName}!N${firstRow}:N${lastRow}`,
           values:
             rewrittenReason
         }
@@ -3367,20 +3425,24 @@ async function getMemberRecord({
   row
 }) {
   const safeSheetName = escapeSheetName(sheetName);
+  const { timezoneColumn } = getTimezoneColumnLayout(sheetName, spreadsheetId);
 
-  const response =
-    await sheets.spreadsheets.values.get({
-      spreadsheetId,
-      range: `${safeSheetName}!C${row}:F${row}`
-    });
+  const response = await sheets.spreadsheets.values.batchGet({
+    spreadsheetId,
+    ranges: [
+      `${safeSheetName}!C${row}:E${row}`,
+      `${safeSheetName}!${timezoneColumn}${row}`
+    ]
+  });
 
-  const values = response.data.values?.[0] || [];
+  const identity = response.data.valueRanges?.[0]?.values?.[0] || [];
+  const timezoneValue = response.data.valueRanges?.[1]?.values?.[0]?.[0] || "";
 
   return {
-    robloxUsername: String(values[0] || "").trim(),
-    discordId: String(values[1] || "").trim(),
-    rank: String(values[2] || "").trim(),
-    timezone: String(values[3] || "").trim()
+    robloxUsername: String(identity[0] || "").trim(),
+    discordId: String(identity[1] || "").trim(),
+    rank: String(identity[2] || "").trim(),
+    timezone: String(timezoneValue || "").trim()
   };
 }
 
@@ -3407,7 +3469,7 @@ async function getStandardAttendanceRecord({
     await sheets.spreadsheets.values.get({
       spreadsheetId,
       range:
-        `${safeSheetName}!H${row}:N${row}`
+        `${safeSheetName}!I${row}:O${row}`
     });
 
   const values =
@@ -3437,7 +3499,7 @@ async function writeStandardAttendanceRecord({
   await sheets.spreadsheets.values.update({
     spreadsheetId,
     range:
-      `${safeSheetName}!H${row}:N${row}`,
+      `${safeSheetName}!I${row}:O${row}`,
     valueInputOption: "USER_ENTERED",
     requestBody: {
       values: [[
@@ -3457,92 +3519,41 @@ async function removeMemberFromSheet({
   sheetName,
   row
 }) {
-  const safeSheetName =
-    escapeSheetName(sheetName);
+  const safeSheetName = escapeSheetName(sheetName);
+  const { timezoneColumn, storageColumn } = getTimezoneColumnLayout(sheetName, spreadsheetId);
 
-  /*
-   * When a member LEAVES a company, only C:F is transferable member
-   * information. Attendance must stay company-specific and therefore
-   * must be erased from the old company.
-   *
-   * Normal attendance companies:
-   *   H:N = Monday-Sunday attendance -> clear all.
-   *
-   * 2. Krümper-Kompanie:
-   *   H:I = Saturday-Sunday attendance -> clear both.
-   *
-   * 1. Krümper-Kompanie:
-   *   H = entry date -> clear it when the member leaves.
-   *
-   * Garnison Kompanie:
-   *   C:N is the member-owned record and is cleared in full.
-   *
-   * Generalstab / other excluded sheets:
-   *   no attendance markers are transferred.
-   *
-   * Column G is internal timezone storage and is cleaned by the
-   * subsequent company sort; it is never copied to the destination.
-   */
-  const ranges =
-    isGarnisonCompany(sheetName)
-      ? [
-          `${safeSheetName}!C${row}:N${row}`
-        ]
-      : [
-          `${safeSheetName}!C${row}`,
-          `${safeSheetName}!D${row}`,
-          `${safeSheetName}!E${row}`,
-          `${safeSheetName}!F${row}`
-        ];
+  const ranges = isGarnisonCompany(sheetName)
+    ? [`${safeSheetName}!C${row}:O${row}`]
+    : [
+        `${safeSheetName}!C${row}`,
+        `${safeSheetName}!D${row}`,
+        `${safeSheetName}!E${row}`,
+        `${safeSheetName}!${timezoneColumn}${row}`,
+        `${safeSheetName}!${storageColumn}${row}`
+      ];
 
-  if (isGarnisonCompany(sheetName)) {
-    /*
-     * C:N covers the full Garnison member record, including:
-     * H = Date Added,
-     * I:L = Duration of Inactivity,
-     * M:N = Reason for Inactivity.
-     *
-     * The full merged ranges are included so no stale inactivity data remains.
-     */
-  } else if (isFirstKrumperCompany(sheetName)) {
-    ranges.push(
-      `${safeSheetName}!H${row}`
-    );
-  } else if (
-    isSecondKrumperCompany(sheetName)
-  ) {
-    ranges.push(
-      `${safeSheetName}!H${row}:I${row}`
-    );
-  } else if (
-    !isAttendanceExcludedCompany(
-      sheetName
-    )
-  ) {
-    ranges.push(
-      `${safeSheetName}!H${row}:N${row}`
-    );
+  if (!isGarnisonCompany(sheetName)) {
+    if (isFirstKrumperCompany(sheetName)) {
+      ranges.push(`${safeSheetName}!I${row}`);
+    } else if (isSecondKrumperCompany(sheetName)) {
+      ranges.push(`${safeSheetName}!I${row}:J${row}`);
+    } else if (!isAttendanceExcludedCompany(sheetName)) {
+      ranges.push(`${safeSheetName}!I${row}:O${row}`);
+    }
   }
 
   await sheets.spreadsheets.values.batchClear({
     spreadsheetId,
-    requestBody: {
-      ranges
-    }
+    requestBody: { ranges }
   });
 
-  console.log(
-    "ORBAT ROW CLEARED:",
-    {
-      sheetName,
-      row,
-      transferredColumns:
-        isGarnisonCompany(sheetName)
-          ? ["C", "D", "E", "F", "G", "H", "I:L", "M:N"]
-          : ["C", "D", "E", "F"],
-      clearedRanges: ranges
-    }
-  );
+  console.log("ORBAT ROW CLEARED:", {
+    sheetName,
+    row,
+    timezoneColumn,
+    storageColumn,
+    clearedRanges: ranges
+  });
 }
 
 async function writeGarnisonInactivity({
@@ -3563,8 +3574,8 @@ async function writeGarnisonInactivity({
 
   /*
    * Garnison merged fields:
-   * I:L = Duration of Inactivity -> write to I, the top-left anchor.
-   * M:N = Reason for Inactivity -> write to M, the top-left anchor.
+   * J:M = Duration of Inactivity -> write to J, the top-left anchor.
+   * N:O = Reason for Inactivity -> write to N, the top-left anchor.
    */
   await sheets.spreadsheets.values.batchUpdate({
     spreadsheetId,
@@ -3572,11 +3583,11 @@ async function writeGarnisonInactivity({
       valueInputOption: "USER_ENTERED",
       data: [
         {
-          range: `${safeSheetName}!I${row}`,
+          range: `${safeSheetName}!J${row}`,
           values: [[duration]]
         },
         {
-          range: `${safeSheetName}!M${row}`,
+          range: `${safeSheetName}!N${row}`,
           values: [[reason]]
         }
       ]
@@ -3701,6 +3712,7 @@ async function addMemberToSheet({
   }
 
   const safeSheetName = escapeSheetName(sheetName);
+  const { timezoneColumn, storageColumn } = getTimezoneColumnLayout(sheetName, spreadsheetId);
 
   const writeData = [
     {
@@ -3716,8 +3728,12 @@ async function addMemberToSheet({
       values: [[rank]]
     },
     {
-      range: `${safeSheetName}!F${row}`,
+      range: `${safeSheetName}!${timezoneColumn}${row}`,
       values: [[timezone]]
+    },
+    {
+      range: `${safeSheetName}!${storageColumn}${row}`,
+      values: [[""]]
     }
   ];
 
@@ -3734,7 +3750,7 @@ async function addMemberToSheet({
       getCurrentOrbatDate();
 
     writeData.push({
-      range: `${safeSheetName}!H${row}`,
+      range: `${safeSheetName}!I${row}`,
       values: [[entryDate]]
     });
 
@@ -3755,21 +3771,21 @@ async function addMemberToSheet({
 
     writeData.push(
       {
-        range: `${safeSheetName}!H${row}`,
+        range: `${safeSheetName}!I${row}`,
         values: [[dateAdded]]
       },
       {
         /*
          * I is the top-left writable cell of merged I:L.
          */
-        range: `${safeSheetName}!I${row}`,
+        range: `${safeSheetName}!J${row}`,
         values: [[""]]
       },
       {
         /*
          * M is the top-left writable cell of merged M:N.
          */
-        range: `${safeSheetName}!M${row}`,
+        range: `${safeSheetName}!N${row}`,
         values: [[""]]
       }
     );
@@ -3782,13 +3798,13 @@ async function addMemberToSheet({
         date: dateAdded
       }
     );
-  } else if (!schuetzen) {
+  } else if (!schuetzen && !isAttendanceExcludedCompany(sheetName)) {
     /*
      * A Krümper entry date must NEVER follow a member into another company.
      * Explicitly blank H for ordinary non-Garnison, non-1. Krümper writes.
      */
     writeData.push({
-      range: `${safeSheetName}!H${row}`,
+      range: `${safeSheetName}!I${row}`,
       values: [[""]]
     });
   }
@@ -3833,7 +3849,8 @@ async function processTimezoneWithAppsScript({
         spreadsheetId,
         sheetName,
         rowNumber: row,
-        timezone
+        timezone,
+        ...getTimezoneColumnLayout(sheetName, spreadsheetId)
       }),
       signal: controller.signal,
       redirect: "follow"
@@ -9115,7 +9132,7 @@ client.on(
             `**Spreadsheet Row:** ${existingMember.row}`,
             nicknameResult,
             "",
-            `Cleared C${existingMember.row}, D${existingMember.row}, E${existingMember.row}, and F${existingMember.row}.`
+            `Cleared the member data from spreadsheet row ${existingMember.row}.`
           ].join("\n")
         );
       } catch (error) {
@@ -9555,7 +9572,7 @@ client.on(
         `**Timezone Submitted:** ${timezone}`,
         `**Spreadsheet Row:** ${row}`,
         "",
-        `Written to C${row}, D${row}, E${row}, and F${row}.`
+        `Written to spreadsheet row ${row}. Timezone column: ${getTimezoneColumnLayout(matchedCompany, regiment.spreadsheetId).timezoneColumn}${row}.`
       ];
 
       if (nicknameResult) {
@@ -9592,7 +9609,7 @@ client.on(
           "",
           "⚠️ The member was added, but the timezone could not be processed automatically.",
           `**Webhook Error:** ${timezoneWarning}`,
-          `The original timezone remains in F${row}.`
+          `The original timezone remains in ${getTimezoneColumnLayout(matchedCompany, regiment.spreadsheetId).timezoneColumn}${row}.`
         );
       }
 
