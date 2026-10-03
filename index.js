@@ -708,53 +708,11 @@ function getTimezoneColumnLayout(
   sheetName,
   spreadsheetId = null
 ) {
-  const normalizedSheet =
-    normalizeText(sheetName);
-
-  const normalizedSpreadsheetId =
-    String(
-      spreadsheetId || ""
-    ).trim();
-
   /*
-   * Timezone layouts now mirror the current Apps Script layouts.
-   *
-   * 11. Erstes Schlesisches:
-   *   - 1. Krümper-Kompanie = F display / G IANA storage
-   *   - 2. Krümper-Kompanie = F display / G IANA storage
-   *   - Garnison Kompanie   = F display / G IANA storage
-   *   - Generalstab and normal line companies = G display / H storage
-   *
-   * 6. Westpreußisches, Jäger, and Schützen:
-   *   - G display / H IANA storage
-   *
-   * spreadsheetId is required to distinguish the repeated Krümper/Garnison
-   * sheet names between regiments.
+   * Column F is reserved for the Army strike total on every ORBAT.
+   * Timezone display is therefore G and the hidden/internal IANA
+   * timezone storage is H on every supported ORBAT sheet.
    */
-  const isErstesSchlesisches =
-    normalizedSpreadsheetId ===
-    String(
-      ERSTESSCHLESISCHES_SPREADSHEET_ID || ""
-    ).trim();
-
-  const isLegacySchlesischesTimezoneSheet =
-    normalizedSheet ===
-      normalizeText("1. Krümper-Kompanie") ||
-    normalizedSheet ===
-      normalizeText("2. Krümper-Kompanie") ||
-    normalizedSheet ===
-      normalizeText("Garnison Kompanie");
-
-  if (
-    isErstesSchlesisches &&
-    isLegacySchlesischesTimezoneSheet
-  ) {
-    return {
-      timezoneColumn: "F",
-      storageColumn: "G"
-    };
-  }
-
   return {
     timezoneColumn: "G",
     storageColumn: "H"
@@ -3419,6 +3377,595 @@ async function findMemberByDiscordId(discordId) {
   return null;
 }
 
+
+/*
+|--------------------------------------------------------------------------
+| Strike system
+|--------------------------------------------------------------------------
+|
+| ORBAT Column F = current strike total (0-10).
+|
+| Strike History is stored in the Army Master Roster spreadsheet so that
+| reasons, issuers, removals, and automatic weekly reductions survive
+| transfers between regiments/companies.
+|
+| Current agreed rules:
+| - minimum issue: 1
+| - normal AWOL guideline: 2
+| - AWOL on own hosted event guideline: 5
+| - maximum current total: 10
+| - current total reduces by 1 for each full week elapsed
+|
+| /strike add accepts a free-text reason.
+| /removestrike also requires a free-text reason.
+|--------------------------------------------------------------------------
+*/
+
+const STRIKE_HISTORY_SHEET_NAME =
+  "Strike History";
+
+const STRIKE_STATE_SHEET_NAME =
+  "Strike State";
+
+const MAX_STRIKES = 10;
+
+function getStrikeNowIso() {
+  return new Date().toISOString();
+}
+
+function formatStrikeDate(value) {
+  const date = new Date(value);
+
+  if (Number.isNaN(date.getTime())) {
+    return String(value || "Unknown");
+  }
+
+  return new Intl.DateTimeFormat(
+    "en-US",
+    {
+      timeZone: "America/Los_Angeles",
+      month: "2-digit",
+      day: "2-digit",
+      year: "numeric"
+    }
+  ).format(date);
+}
+
+async function ensureStrikeSheets() {
+  const metadata =
+    await sheets.spreadsheets.get({
+      spreadsheetId:
+        MASTER_ROSTER_SPREADSHEET_ID,
+      fields:
+        "sheets.properties.title"
+    });
+
+  const titles =
+    new Set(
+      (metadata.data.sheets || [])
+        .map(
+          sheet =>
+            String(
+              sheet.properties?.title ||
+              ""
+            )
+        )
+    );
+
+  const requests = [];
+
+  if (
+    !titles.has(
+      STRIKE_HISTORY_SHEET_NAME
+    )
+  ) {
+    requests.push({
+      addSheet: {
+        properties: {
+          title:
+            STRIKE_HISTORY_SHEET_NAME
+        }
+      }
+    });
+  }
+
+  if (
+    !titles.has(
+      STRIKE_STATE_SHEET_NAME
+    )
+  ) {
+    requests.push({
+      addSheet: {
+        properties: {
+          title:
+            STRIKE_STATE_SHEET_NAME
+        }
+      }
+    });
+  }
+
+  if (requests.length > 0) {
+    await sheets.spreadsheets.batchUpdate({
+      spreadsheetId:
+        MASTER_ROSTER_SPREADSHEET_ID,
+      requestBody: {
+        requests
+      }
+    });
+  }
+
+  const writes = [];
+
+  if (
+    !titles.has(
+      STRIKE_HISTORY_SHEET_NAME
+    )
+  ) {
+    writes.push({
+      range:
+        `'${STRIKE_HISTORY_SHEET_NAME}'!A1:J1`,
+      values: [[
+        "Timestamp",
+        "Discord ID",
+        "Roblox Username",
+        "Type",
+        "Change",
+        "Reason",
+        "Staff Discord ID",
+        "Staff",
+        "Regiment",
+        "Kompanie"
+      ]]
+    });
+  }
+
+  if (
+    !titles.has(
+      STRIKE_STATE_SHEET_NAME
+    )
+  ) {
+    writes.push({
+      range:
+        `'${STRIKE_STATE_SHEET_NAME}'!A1:B1`,
+      values: [[
+        "Discord ID",
+        "Last Weekly Reduction Check"
+      ]]
+    });
+  }
+
+  if (writes.length > 0) {
+    await sheets.spreadsheets.values.batchUpdate({
+      spreadsheetId:
+        MASTER_ROSTER_SPREADSHEET_ID,
+      requestBody: {
+        valueInputOption:
+          "RAW",
+        data:
+          writes
+      }
+    });
+  }
+}
+
+async function getStrikeHistory(
+  discordId
+) {
+  await ensureStrikeSheets();
+
+  const response =
+    await sheets.spreadsheets.values.get({
+      spreadsheetId:
+        MASTER_ROSTER_SPREADSHEET_ID,
+      range:
+        `'${STRIKE_HISTORY_SHEET_NAME}'!A2:J`,
+      majorDimension:
+        "ROWS"
+    });
+
+  return (
+    response.data.values || []
+  )
+    .filter(
+      row =>
+        String(
+          row?.[1] || ""
+        ).trim() ===
+        String(discordId).trim()
+    )
+    .map(row => ({
+      timestamp:
+        String(row?.[0] || ""),
+      discordId:
+        String(row?.[1] || ""),
+      robloxUsername:
+        String(row?.[2] || ""),
+      type:
+        String(row?.[3] || ""),
+      change:
+        Number.parseInt(
+          String(row?.[4] || "0"),
+          10
+        ) || 0,
+      reason:
+        String(row?.[5] || ""),
+      staffDiscordId:
+        String(row?.[6] || ""),
+      staff:
+        String(row?.[7] || ""),
+      regiment:
+        String(row?.[8] || ""),
+      kompanie:
+        String(row?.[9] || "")
+    }));
+}
+
+function calculateStrikeTotal(history) {
+  return Math.max(
+    0,
+    Math.min(
+      MAX_STRIKES,
+      history.reduce(
+        (total, entry) =>
+          total + entry.change,
+        0
+      )
+    )
+  );
+}
+
+async function appendStrikeHistory({
+  discordId,
+  robloxUsername,
+  type,
+  change,
+  reason,
+  staffDiscordId,
+  staff,
+  regiment,
+  kompanie
+}) {
+  await ensureStrikeSheets();
+
+  await sheets.spreadsheets.values.append({
+    spreadsheetId:
+      MASTER_ROSTER_SPREADSHEET_ID,
+    range:
+      `'${STRIKE_HISTORY_SHEET_NAME}'!A:J`,
+    valueInputOption:
+      "RAW",
+    insertDataOption:
+      "INSERT_ROWS",
+    requestBody: {
+      values: [[
+        getStrikeNowIso(),
+        discordId,
+        robloxUsername || "",
+        type,
+        change,
+        reason,
+        staffDiscordId || "",
+        staff || "",
+        regiment || "",
+        kompanie || ""
+      ]]
+    }
+  });
+}
+
+async function getStrikeState(
+  discordId
+) {
+  await ensureStrikeSheets();
+
+  const response =
+    await sheets.spreadsheets.values.get({
+      spreadsheetId:
+        MASTER_ROSTER_SPREADSHEET_ID,
+      range:
+        `'${STRIKE_STATE_SHEET_NAME}'!A2:B`,
+      majorDimension:
+        "ROWS"
+    });
+
+  const rows =
+    response.data.values || [];
+
+  for (
+    let index = 0;
+    index < rows.length;
+    index += 1
+  ) {
+    if (
+      String(
+        rows[index]?.[0] || ""
+      ).trim() ===
+      String(discordId).trim()
+    ) {
+      return {
+        row:
+          index + 2,
+        lastCheck:
+          String(
+            rows[index]?.[1] || ""
+          ).trim()
+      };
+    }
+  }
+
+  return null;
+}
+
+async function setStrikeState(
+  discordId,
+  dateIso
+) {
+  const state =
+    await getStrikeState(
+      discordId
+    );
+
+  if (state) {
+    await sheets.spreadsheets.values.update({
+      spreadsheetId:
+        MASTER_ROSTER_SPREADSHEET_ID,
+      range:
+        `'${STRIKE_STATE_SHEET_NAME}'!A${state.row}:B${state.row}`,
+      valueInputOption:
+        "RAW",
+      requestBody: {
+        values: [[
+          discordId,
+          dateIso
+        ]]
+      }
+    });
+    return;
+  }
+
+  await sheets.spreadsheets.values.append({
+    spreadsheetId:
+      MASTER_ROSTER_SPREADSHEET_ID,
+    range:
+      `'${STRIKE_STATE_SHEET_NAME}'!A:B`,
+    valueInputOption:
+      "RAW",
+    insertDataOption:
+      "INSERT_ROWS",
+    requestBody: {
+      values: [[
+        discordId,
+        dateIso
+      ]]
+    }
+  });
+}
+
+async function writeMemberStrikeTotal({
+  existingMember,
+  total
+}) {
+  const safeSheetName =
+    escapeSheetName(
+      existingMember.companyName
+    );
+
+  await sheets.spreadsheets.values.update({
+    spreadsheetId:
+      existingMember.regiment.spreadsheetId,
+    range:
+      `${safeSheetName}!F${existingMember.row}`,
+    valueInputOption:
+      "RAW",
+    requestBody: {
+      values: [[
+        Math.max(
+          0,
+          Math.min(
+            MAX_STRIKES,
+            total
+          )
+        )
+      ]]
+    }
+  });
+}
+
+async function applyWeeklyStrikeReduction({
+  discordId,
+  existingMember,
+  memberRecord
+}) {
+  let history =
+    await getStrikeHistory(
+      discordId
+    );
+
+  let total =
+    calculateStrikeTotal(
+      history
+    );
+
+  let state =
+    await getStrikeState(
+      discordId
+    );
+
+  const now =
+    new Date();
+
+  if (!state?.lastCheck) {
+    await setStrikeState(
+      discordId,
+      now.toISOString()
+    );
+
+    await writeMemberStrikeTotal({
+      existingMember,
+      total
+    });
+
+    return {
+      total,
+      history,
+      reducedBy: 0
+    };
+  }
+
+  const lastCheck =
+    new Date(
+      state.lastCheck
+    );
+
+  if (
+    Number.isNaN(
+      lastCheck.getTime()
+    )
+  ) {
+    await setStrikeState(
+      discordId,
+      now.toISOString()
+    );
+
+    await writeMemberStrikeTotal({
+      existingMember,
+      total
+    });
+
+    return {
+      total,
+      history,
+      reducedBy: 0
+    };
+  }
+
+  const weekMs =
+    7 * 24 * 60 * 60 * 1000;
+
+  const fullWeeks =
+    Math.floor(
+      (
+        now.getTime() -
+        lastCheck.getTime()
+      ) /
+      weekMs
+    );
+
+  if (fullWeeks <= 0) {
+    await writeMemberStrikeTotal({
+      existingMember,
+      total
+    });
+
+    return {
+      total,
+      history,
+      reducedBy: 0
+    };
+  }
+
+  const reducedBy =
+    Math.min(
+      fullWeeks,
+      total
+    );
+
+  if (reducedBy > 0) {
+    await appendStrikeHistory({
+      discordId,
+      robloxUsername:
+        memberRecord.robloxUsername,
+      type:
+        "Weekly Reduction",
+      change:
+        -reducedBy,
+      reason:
+        `Automatic weekly reduction for ${fullWeeks} full week(s).`,
+      staffDiscordId:
+        "SYSTEM",
+      staff:
+        "Prussian ORBAT Bot",
+      regiment:
+        existingMember.regiment.displayName,
+      kompanie:
+        existingMember.companyName
+    });
+
+    history =
+      await getStrikeHistory(
+        discordId
+      );
+
+    total =
+      calculateStrikeTotal(
+        history
+      );
+  }
+
+  /*
+   * Advance by the full number of elapsed weeks instead of resetting
+   * the clock to an arbitrary partial-week boundary.
+   */
+  const advanced =
+    new Date(
+      lastCheck.getTime() +
+      fullWeeks * weekMs
+    );
+
+  await setStrikeState(
+    discordId,
+    advanced.toISOString()
+  );
+
+  await writeMemberStrikeTotal({
+    existingMember,
+    total
+  });
+
+  return {
+    total,
+    history,
+    reducedBy
+  };
+}
+
+function buildStrikeHistoryLines(
+  history,
+  limit = 10
+) {
+  if (!history.length) {
+    return [
+      "No strike history."
+    ];
+  }
+
+  return history
+    .slice()
+    .reverse()
+    .slice(0, limit)
+    .map(entry => {
+      const sign =
+        entry.change > 0
+          ? "+"
+          : "";
+
+      const reason =
+        entry.reason ||
+        "No reason provided.";
+
+      const staff =
+        entry.staff ||
+        entry.staffDiscordId ||
+        "Unknown";
+
+      return (
+        `• **${sign}${entry.change} — ${entry.type}** ` +
+        `(${formatStrikeDate(entry.timestamp)}) — ` +
+        `${reason} — **By:** ${staff}`
+      );
+    });
+}
+
 async function getMemberRecord({
   spreadsheetId,
   sheetName,
@@ -3430,7 +3977,7 @@ async function getMemberRecord({
   const response = await sheets.spreadsheets.values.batchGet({
     spreadsheetId,
     ranges: [
-      `${safeSheetName}!C${row}:E${row}`,
+      `${safeSheetName}!C${row}:F${row}`,
       `${safeSheetName}!${timezoneColumn}${row}`
     ]
   });
@@ -3442,6 +3989,16 @@ async function getMemberRecord({
     robloxUsername: String(identity[0] || "").trim(),
     discordId: String(identity[1] || "").trim(),
     rank: String(identity[2] || "").trim(),
+    strikes: Math.max(
+      0,
+      Math.min(
+        10,
+        Number.parseInt(
+          String(identity[3] || "0"),
+          10
+        ) || 0
+      )
+    ),
     timezone: String(timezoneValue || "").trim()
   };
 }
@@ -3528,6 +4085,7 @@ async function removeMemberFromSheet({
         `${safeSheetName}!C${row}`,
         `${safeSheetName}!D${row}`,
         `${safeSheetName}!E${row}`,
+        `${safeSheetName}!F${row}`,
         `${safeSheetName}!${timezoneColumn}${row}`,
         `${safeSheetName}!${storageColumn}${row}`
       ];
@@ -3621,6 +4179,7 @@ async function addMemberToSheet({
   discordId,
   rank,
   timezone,
+  strikes = 0,
   position = null,
   platoon = null
 }) {
@@ -3726,6 +4285,21 @@ async function addMemberToSheet({
     {
       range: `${safeSheetName}!E${row}`,
       values: [[rank]]
+    },
+    {
+      range: `${safeSheetName}!F${row}`,
+      values: [[
+        Math.max(
+          0,
+          Math.min(
+            10,
+            Number.parseInt(
+              String(strikes || "0"),
+              10
+            ) || 0
+          )
+        )
+      ]]
     },
     {
       range: `${safeSheetName}!${timezoneColumn}${row}`,
@@ -6826,6 +7400,298 @@ client.on(
       }
     }
 
+    if (interaction.commandName === "strike") {
+      try {
+        await interaction.deferReply({
+          flags:
+            MessageFlags.Ephemeral
+        });
+
+        const subcommand =
+          interaction.options.getSubcommand(
+            true
+          );
+
+        if (subcommand !== "add") {
+          await interaction.editReply(
+            "Unknown strike action."
+          );
+          return;
+        }
+
+        const discordMember =
+          interaction.options.getUser(
+            "discord_member",
+            true
+          );
+
+        const strikeType =
+          interaction.options.getString(
+            "type",
+            true
+          );
+
+        const amount =
+          interaction.options.getInteger(
+            "amount",
+            true
+          );
+
+        const reason =
+          interaction.options.getString(
+            "reason",
+            true
+          ).trim();
+
+        const existingMember =
+          await findMemberByDiscordId(
+            discordMember.id
+          );
+
+        if (!existingMember) {
+          await interaction.editReply(
+            "That member was not found in the Grand ORBAT."
+          );
+          return;
+        }
+
+        const memberRecord =
+          await getMemberRecord({
+            spreadsheetId:
+              existingMember.regiment.spreadsheetId,
+            sheetName:
+              existingMember.companyName,
+            row:
+              existingMember.row
+          });
+
+        const before =
+          await applyWeeklyStrikeReduction({
+            discordId:
+              discordMember.id,
+            existingMember,
+            memberRecord
+          });
+
+        if (
+          before.total + amount >
+          MAX_STRIKES
+        ) {
+          await interaction.editReply(
+            [
+              "The strike was not added.",
+              "",
+              `**Current Strikes:** ${before.total} / ${MAX_STRIKES}`,
+              `**Requested:** +${amount}`,
+              `This would exceed the maximum of ${MAX_STRIKES} strikes.`
+            ].join("\n")
+          );
+          return;
+        }
+
+        await appendStrikeHistory({
+          discordId:
+            discordMember.id,
+          robloxUsername:
+            memberRecord.robloxUsername,
+          type:
+            strikeType,
+          change:
+            amount,
+          reason,
+          staffDiscordId:
+            interaction.user.id,
+          staff:
+            interaction.user.tag ||
+            interaction.user.username,
+          regiment:
+            existingMember.regiment.displayName,
+          kompanie:
+            existingMember.companyName
+        });
+
+        const afterTotal =
+          before.total + amount;
+
+        await writeMemberStrikeTotal({
+          existingMember,
+          total:
+            afterTotal
+        });
+
+        await interaction.editReply(
+          [
+            "**Strike Added**",
+            "",
+            `**Member:** ${discordMember}`,
+            `**Type:** ${strikeType}`,
+            `**Strikes Added:** ${amount}`,
+            `**Reason:** ${reason}`,
+            `**Issued By:** ${interaction.user}`,
+            "",
+            `**Previous Total:** ${before.total} / ${MAX_STRIKES}`,
+            `**New Total:** ${afterTotal} / ${MAX_STRIKES}`,
+            `**ORBAT:** ${existingMember.regiment.displayName} — ${existingMember.companyName}`,
+            `**Column F:** F${existingMember.row}`
+          ].join("\n")
+        );
+
+        return;
+      } catch (error) {
+        console.error(
+          "Failed to add strike:",
+          error
+        );
+
+        if (
+          interaction.deferred ||
+          interaction.replied
+        ) {
+          await interaction.editReply(
+            `The strike could not be added: ${error?.message || "Unknown error."}`
+          );
+        }
+        return;
+      }
+    }
+
+    if (
+      interaction.commandName ===
+      "removestrike"
+    ) {
+      try {
+        await interaction.deferReply({
+          flags:
+            MessageFlags.Ephemeral
+        });
+
+        const discordMember =
+          interaction.options.getUser(
+            "discord_member",
+            true
+          );
+
+        const amount =
+          interaction.options.getInteger(
+            "amount",
+            true
+          );
+
+        const reason =
+          interaction.options.getString(
+            "reason",
+            true
+          ).trim();
+
+        const existingMember =
+          await findMemberByDiscordId(
+            discordMember.id
+          );
+
+        if (!existingMember) {
+          await interaction.editReply(
+            "That member was not found in the Grand ORBAT."
+          );
+          return;
+        }
+
+        const memberRecord =
+          await getMemberRecord({
+            spreadsheetId:
+              existingMember.regiment.spreadsheetId,
+            sheetName:
+              existingMember.companyName,
+            row:
+              existingMember.row
+          });
+
+        const before =
+          await applyWeeklyStrikeReduction({
+            discordId:
+              discordMember.id,
+            existingMember,
+            memberRecord
+          });
+
+        if (
+          amount >
+          before.total
+        ) {
+          await interaction.editReply(
+            [
+              "The strikes were not removed.",
+              "",
+              `**Current Strikes:** ${before.total} / ${MAX_STRIKES}`,
+              `**Requested Removal:** ${amount}`,
+              "You cannot remove more strikes than the member currently has."
+            ].join("\n")
+          );
+          return;
+        }
+
+        await appendStrikeHistory({
+          discordId:
+            discordMember.id,
+          robloxUsername:
+            memberRecord.robloxUsername,
+          type:
+            "Manual Removal",
+          change:
+            -amount,
+          reason,
+          staffDiscordId:
+            interaction.user.id,
+          staff:
+            interaction.user.tag ||
+            interaction.user.username,
+          regiment:
+            existingMember.regiment.displayName,
+          kompanie:
+            existingMember.companyName
+        });
+
+        const afterTotal =
+          before.total - amount;
+
+        await writeMemberStrikeTotal({
+          existingMember,
+          total:
+            afterTotal
+        });
+
+        await interaction.editReply(
+          [
+            "**Strikes Removed**",
+            "",
+            `**Member:** ${discordMember}`,
+            `**Strikes Removed:** ${amount}`,
+            `**Reason:** ${reason}`,
+            `**Removed By:** ${interaction.user}`,
+            "",
+            `**Previous Total:** ${before.total} / ${MAX_STRIKES}`,
+            `**New Total:** ${afterTotal} / ${MAX_STRIKES}`
+          ].join("\n")
+        );
+
+        return;
+      } catch (error) {
+        console.error(
+          "Failed to remove strike:",
+          error
+        );
+
+        if (
+          interaction.deferred ||
+          interaction.replied
+        ) {
+          await interaction.editReply(
+            `The strikes could not be removed: ${error?.message || "Unknown error."}`
+          );
+        }
+        return;
+      }
+    }
+
     if (interaction.commandName === "memberinfo") {
       try {
         await interaction.deferReply({ flags: MessageFlags.Ephemeral });
@@ -6860,6 +7726,20 @@ client.on(
           row: existingMember.row
         });
 
+        const strikeSummary =
+          await applyWeeklyStrikeReduction({
+            discordId:
+              discordMember.id,
+            existingMember,
+            memberRecord
+          });
+
+        const strikeHistoryLines =
+          buildStrikeHistoryLines(
+            strikeSummary.history,
+            10
+          );
+
         await interaction.editReply(
           [
             "**Grand ORBAT Member Information**",
@@ -6871,6 +7751,10 @@ client.on(
             `**Rank:** ${memberRecord.rank || "Not set"}`,
             `**Timezone:** ${memberRecord.timezone || "Not set"}`,
             `**Sheet Row:** ${existingMember.row}`,
+            `**Current Strikes:** ${strikeSummary.total} / ${MAX_STRIKES}`,
+            "",
+            "**Strike History (latest 10)**",
+            ...strikeHistoryLines,
             "",
             "**Current Attendance**",
             ...attendanceSummary.lines
@@ -7862,6 +8746,8 @@ client.on(
               finalRank,
             timezone:
               memberRecord.timezone,
+            strikes:
+              memberRecord.strikes,
             position:
               destinationPosition
           });
@@ -7938,7 +8824,9 @@ client.on(
               row:
                 destinationRow,
               timezone:
-                memberRecord.timezone
+                memberRecord.timezone,
+              strikes:
+                memberRecord.strikes
             });
           } catch (webhookError) {
             console.error(
@@ -8295,7 +9183,9 @@ client.on(
               rank:
                 newRank,
               timezone:
-                memberRecord.timezone
+                memberRecord.timezone,
+              strikes:
+                memberRecord.strikes
             });
 
           let timezoneWarning = null;
@@ -8525,7 +9415,9 @@ client.on(
               rank:
                 newRank,
               timezone:
-                memberRecord.timezone
+                memberRecord.timezone,
+              strikes:
+                memberRecord.strikes
             });
 
           let timezoneWarning = null;

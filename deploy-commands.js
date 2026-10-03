@@ -384,8 +384,101 @@ const commands = [
     .toJSON(),
 
   new SlashCommandBuilder()
+    .setName("strike")
+    .setDescription(
+      "Manages member strikes."
+    )
+    .addSubcommand(subcommand =>
+      subcommand
+        .setName("add")
+        .setDescription(
+          "Adds strikes to a Grand ORBAT member."
+        )
+        .addUserOption(option =>
+          option
+            .setName("discord_member")
+            .setDescription(
+              "Select the member receiving the strike."
+            )
+            .setRequired(true)
+        )
+        .addStringOption(option =>
+          option
+            .setName("type")
+            .setDescription(
+              "Select the strike type."
+            )
+            .setRequired(true)
+            .addChoices(
+              {
+                name: "Disciplinary",
+                value: "Disciplinary"
+              },
+              {
+                name: "Activity",
+                value: "Activity"
+              }
+            )
+        )
+        .addIntegerOption(option =>
+          option
+            .setName("amount")
+            .setDescription(
+              "Number of strikes to add (1-5)."
+            )
+            .setRequired(true)
+            .setMinValue(1)
+            .setMaxValue(5)
+        )
+        .addStringOption(option =>
+          option
+            .setName("reason")
+            .setDescription(
+              "Enter the reason for the strike."
+            )
+            .setRequired(true)
+            .setMaxLength(500)
+        )
+    )
+    .toJSON(),
+
+  new SlashCommandBuilder()
+    .setName("removestrike")
+    .setDescription(
+      "Removes strikes from a Grand ORBAT member."
+    )
+    .addUserOption(option =>
+      option
+        .setName("discord_member")
+        .setDescription(
+          "Select the member whose strikes will be reduced."
+        )
+        .setRequired(true)
+    )
+    .addIntegerOption(option =>
+      option
+        .setName("amount")
+        .setDescription(
+          "Number of strikes to remove."
+        )
+        .setRequired(true)
+        .setMinValue(1)
+        .setMaxValue(10)
+    )
+    .addStringOption(option =>
+      option
+        .setName("reason")
+        .setDescription(
+          "Enter the reason for removing the strikes."
+        )
+        .setRequired(true)
+        .setMaxLength(500)
+    )
+    .toJSON(),
+
+  new SlashCommandBuilder()
     .setName("memberinfo")
-    .setDescription("Shows a member's Grand ORBAT information and attendance.")
+    .setDescription("Shows a member's ORBAT information, strikes, history, and attendance.")
     .addUserOption(option =>
       option
         .setName("discord_member")
