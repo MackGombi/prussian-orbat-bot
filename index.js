@@ -7004,6 +7004,47 @@ client.on(
     }
 
     /*
+     * ACKNOWLEDGE STRIKE COMMANDS IMMEDIATELY
+     *
+     * Discord only gives a slash command a short window to acknowledge
+     * the interaction. /strike and /removestrike can perform several
+     * Google Sheets / Master Roster operations, so defer them here,
+     * before any other command routing or sheet work occurs.
+     */
+    if (
+      interaction.commandName === "strike" ||
+      interaction.commandName === "removestrike"
+    ) {
+      try {
+        if (
+          !interaction.deferred &&
+          !interaction.replied
+        ) {
+          await interaction.deferReply({
+            flags:
+              MessageFlags.Ephemeral
+          });
+        }
+
+        console.log(
+          "[STRIKE COMMAND ACKNOWLEDGED]",
+          {
+            commandName:
+              interaction.commandName,
+            userId:
+              interaction.user?.id || null
+          }
+        );
+      } catch (ackError) {
+        console.error(
+          "[STRIKE COMMAND ACKNOWLEDGEMENT FAILED]",
+          ackError
+        );
+        return;
+      }
+    }
+
+    /*
      * Handle /syncmasterroster FIRST.
      *
      * This intentionally sits immediately after the ChatInputCommand guard
@@ -7745,10 +7786,19 @@ client.on(
 
     if (interaction.commandName === "strike") {
       try {
-        await interaction.deferReply({
-          flags:
-            MessageFlags.Ephemeral
-        });
+        if (
+          !interaction.deferred &&
+          !interaction.replied
+        ) {
+          await interaction.deferReply({
+            flags:
+              MessageFlags.Ephemeral
+          });
+        }
+
+        console.log(
+          "[STRIKE ADD] Handler entered"
+        );
 
         const subcommand =
           interaction.options.getSubcommand(
@@ -7908,10 +7958,19 @@ client.on(
       "removestrike"
     ) {
       try {
-        await interaction.deferReply({
-          flags:
-            MessageFlags.Ephemeral
-        });
+        if (
+          !interaction.deferred &&
+          !interaction.replied
+        ) {
+          await interaction.deferReply({
+            flags:
+              MessageFlags.Ephemeral
+          });
+        }
+
+        console.log(
+          "[REMOVE STRIKE] Handler entered"
+        );
 
         const discordMember =
           interaction.options.getUser(
