@@ -4608,6 +4608,112 @@ async function addMemberToSheet({
   return row;
 }
 
+
+/*
+|--------------------------------------------------------------------------
+| Final ORBAT column enforcement
+|--------------------------------------------------------------------------
+|
+| This is intentionally run AFTER Apps Script timezone processing.
+| It prevents an older/stale Apps Script deployment from moving a normal
+| company's timezone back into column F.
+|
+| Krümper/Garnison:
+|   F = timezone, G = IANA storage
+|
+| All other ORBAT sheets:
+|   F = strikes, G = timezone, H = IANA storage
+|--------------------------------------------------------------------------
+*/
+
+async function enforceOrbatTimezoneLayout({
+  spreadsheetId,
+  sheetName,
+  row,
+  timezone,
+  ianaTimezone = ""
+}) {
+  const safeSheetName = escapeSheetName(sheetName);
+  const layout = getOrbatColumnLayout(sheetName, spreadsheetId);
+
+  if (!layout.strikeColumn) {
+    await sheets.spreadsheets.values.batchUpdate({
+      spreadsheetId,
+      requestBody: {
+        valueInputOption: "USER_ENTERED",
+        data: [
+          {
+            range: `${safeSheetName}!${layout.timezoneColumn}${row}`,
+            values: [[timezone]]
+          },
+          {
+            range: `${safeSheetName}!${layout.storageColumn}${row}`,
+            values: [[ianaTimezone]]
+          }
+        ]
+      }
+    });
+
+    console.log("[ORBAT LAYOUT ENFORCED]", {
+      sheetName,
+      row,
+      strikes: "hidden",
+      timezoneCell: `${layout.timezoneColumn}${row}`,
+      storageCell: `${layout.storageColumn}${row}`
+    });
+
+    return;
+  }
+
+  // Preserve the existing strike total. If F was incorrectly overwritten
+  // with a timezone by a stale Apps Script deployment, restore it to 0.
+  const strikeRange = `${safeSheetName}!${layout.strikeColumn}${row}`;
+  const strikeResponse = await sheets.spreadsheets.values.get({
+    spreadsheetId,
+    range: strikeRange
+  });
+
+  const currentStrikeValue = String(
+    strikeResponse.data.values?.[0]?.[0] ?? ""
+  ).trim();
+
+  const parsedStrike = Number.parseInt(currentStrikeValue, 10);
+  const safeStrike =
+    Number.isFinite(parsedStrike)
+      ? Math.max(0, Math.min(MAX_STRIKES, parsedStrike))
+      : 0;
+
+  await sheets.spreadsheets.values.batchUpdate({
+    spreadsheetId,
+    requestBody: {
+      valueInputOption: "USER_ENTERED",
+      data: [
+        {
+          range: strikeRange,
+          values: [[safeStrike]]
+        },
+        {
+          range: `${safeSheetName}!${layout.timezoneColumn}${row}`,
+          values: [[timezone]]
+        },
+        {
+          range: `${safeSheetName}!${layout.storageColumn}${row}`,
+          values: [[ianaTimezone]]
+        }
+      ]
+    }
+  });
+
+  console.log("[ORBAT LAYOUT ENFORCED]", {
+    sheetName,
+    row,
+    strikeCell: `${layout.strikeColumn}${row}`,
+    strikeValue: safeStrike,
+    timezoneCell: `${layout.timezoneColumn}${row}`,
+    storageCell: `${layout.storageColumn}${row}`
+  });
+}
+
 /*
 |--------------------------------------------------------------------------
 | Apps Script webhook
@@ -10590,6 +10696,22 @@ client.on(
           webhookError?.message ||
           "The Apps Script webhook failed.";
       }
+
+      /*
+       * Final safeguard: re-apply the destination sheet's column layout
+       * after the Apps Script webhook. This makes /addmember authoritative
+       * even if Railway is still pointing at an older Apps Script deployment.
+       */
+      await enforceOrbatTimezoneLayout({
+        spreadsheetId: regiment.spreadsheetId,
+        sheetName: matchedCompany,
+        row,
+        timezone,
+        ianaTimezone:
+          timezoneResult?.ianaTimezone ||
+          timezoneResult?.timezone ||
+          ""
+      });
 
       await sortCompanyByRank({
         spreadsheetId:
