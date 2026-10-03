@@ -7188,7 +7188,9 @@ client.on(
       interaction.commandName !== "roster" &&
       interaction.commandName !== "strength" &&
       interaction.commandName !== "attendanceview" &&
-      interaction.commandName !== "audit"
+      interaction.commandName !== "audit" &&
+      interaction.commandName !== "strike" &&
+      interaction.commandName !== "removestrike"
     ) {
       return;
     }
