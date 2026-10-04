@@ -3974,12 +3974,16 @@ async function writeMemberStrikeTotal({
         )
       ]]
     }
-  });  await clearLegacyTimezoneNoteFromStrikeCell({
-    spreadsheetId,
-    sheetName,
-    row
   });
 
+  await clearLegacyTimezoneNoteFromStrikeCell({
+    spreadsheetId:
+      existingMember.regiment.spreadsheetId,
+    sheetName:
+      existingMember.companyName,
+    row:
+      existingMember.row
+  });
 }
 
 async function applyWeeklyStrikeReduction({
