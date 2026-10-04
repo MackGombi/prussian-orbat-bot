@@ -4744,7 +4744,8 @@ async function enforceOrbatTimezoneLayout({
   sheetName,
   row,
   timezone,
-  ianaTimezone = ""
+  ianaTimezone = "",
+  strikes = null
 }) {
   const safeSheetName = escapeSheetName(sheetName);
   const layout = getOrbatColumnLayout(sheetName, spreadsheetId);
@@ -4813,11 +4814,32 @@ async function enforceOrbatTimezoneLayout({
     strikeResponse.data.values?.[0]?.[0] ?? ""
   ).trim();
 
-  const parsedStrike = Number.parseInt(currentStrikeValue, 10);
+  const suppliedStrike =
+    Number.parseInt(
+      String(strikes ?? ""),
+      10
+    );
+
+  const parsedStrike =
+    Number.parseInt(
+      currentStrikeValue,
+      10
+    );
+
+  // A transfer-supplied strike total is authoritative.
+  // Otherwise preserve the existing strike cell.
   const safeStrike =
-    Number.isFinite(parsedStrike)
-      ? Math.max(0, Math.min(MAX_STRIKES, parsedStrike))
-      : 0;
+    Number.isFinite(suppliedStrike)
+      ? Math.max(
+          0,
+          Math.min(MAX_STRIKES, suppliedStrike)
+        )
+      : Number.isFinite(parsedStrike)
+        ? Math.max(
+            0,
+            Math.min(MAX_STRIKES, parsedStrike)
+          )
+        : 0;
 
   await sheets.spreadsheets.values.batchUpdate({
     spreadsheetId,
@@ -9454,7 +9476,9 @@ client.on(
               ianaTimezone:
                 timezoneResult?.storageValue ||
                 memberRecord.timezoneStorage ||
-                ""
+                "",
+              strikes:
+                memberRecord.strikes
             });
 
             console.log(
@@ -9504,7 +9528,9 @@ client.on(
                   memberRecord.timezone,
                 ianaTimezone:
                   memberRecord.timezoneStorage ||
-                  ""
+                  "",
+                strikes:
+                  memberRecord.strikes
               });
             } catch (layoutError) {
               console.error(
@@ -9574,6 +9600,62 @@ client.on(
             discordId:
               discordMember.id
           }) || destinationRow;
+
+        /*
+         * Sorting may move the transferred member to another row.
+         * Write the carried strike total again on the FINAL destination row.
+         */
+        const finalDestinationStrikeColumn =
+          getStrikeColumn(
+            matchedCompany,
+            newRegiment.spreadsheetId
+          );
+
+        if (finalDestinationStrikeColumn) {
+          const safeDestinationSheet =
+            escapeSheetName(
+              matchedCompany
+            );
+
+          await sheets.spreadsheets.values.update({
+            spreadsheetId:
+              newRegiment.spreadsheetId,
+            range:
+              `${safeDestinationSheet}!${finalDestinationStrikeColumn}${destinationRow}`,
+            valueInputOption:
+              "RAW",
+            requestBody: {
+              values: [[
+                memberRecord.strikes
+              ]]
+            }
+          });
+
+          await clearLegacyTimezoneNoteFromStrikeCell({
+            spreadsheetId:
+              newRegiment.spreadsheetId,
+            sheetName:
+              matchedCompany,
+            row:
+              destinationRow
+          });
+
+          console.log(
+            "[TRANSFER STRIKES WRITTEN TO FINAL ROW]",
+            {
+              discordId:
+                discordMember.id,
+              company:
+                matchedCompany,
+              row:
+                destinationRow,
+              strikeCell:
+                `${finalDestinationStrikeColumn}${destinationRow}`,
+              strikes:
+                memberRecord.strikes
+            }
+          );
+        }
 
         await syncMasterRosterMember({
           discordId:
