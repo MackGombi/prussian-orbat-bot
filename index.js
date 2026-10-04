@@ -712,32 +712,41 @@ function getOrbatColumnLayout(
     normalizeText(sheetName);
 
   /*
-   * Krümper + Garnison:
-   *   F = visible timezone
-   *   G = hidden/internal IANA timezone storage
-   *   strikes are NOT displayed on the ORBAT
+   * CANONICAL ORBAT COLUMN RULE
    *
-   * All other ORBAT sheets:
-   *   F = current strike total
-   *   G = visible timezone
-   *   H = hidden/internal IANA timezone storage
+   * Normal company sheets:
+   *   F = Strikes
+   *   G = Timezone / timezone error note
+   *   H = Timezone storage
+   *
+   * Krümper and Garnison:
+   *   F = Timezone / timezone error note
+   *   G = Timezone storage
+   *   No displayed strike column
+   *
+   * The destination sheet name controls the layout. Never infer the
+   * timezone column from the source sheet or from the member's old row.
    */
-  const hidesStrikes =
-    normalized.includes("krumper") ||
+  const isKrumper =
+    normalized.includes("krumper");
+
+  const isGarnison =
     normalized.includes("garnison");
 
-  if (hidesStrikes) {
+  if (isKrumper || isGarnison) {
     return {
       strikeColumn: null,
       timezoneColumn: "F",
-      storageColumn: "G"
+      storageColumn: "G",
+      errorColumn: "F"
     };
   }
 
   return {
     strikeColumn: "F",
     timezoneColumn: "G",
-    storageColumn: "H"
+    storageColumn: "H",
+    errorColumn: "G"
   };
 }
 
@@ -752,8 +761,12 @@ function getTimezoneColumnLayout(
     );
 
   return {
-    timezoneColumn: layout.timezoneColumn,
-    storageColumn: layout.storageColumn
+    timezoneColumn:
+      layout.timezoneColumn,
+    storageColumn:
+      layout.storageColumn,
+    errorColumn:
+      layout.errorColumn
   };
 }
 
@@ -4888,6 +4901,84 @@ async function enforceOrbatTimezoneLayout({
 |--------------------------------------------------------------------------
 */
 
+async function setTimezoneErrorNote({
+  spreadsheetId,
+  sheetName,
+  row,
+  message
+}) {
+  const layout =
+    getOrbatColumnLayout(
+      sheetName,
+      spreadsheetId
+    );
+
+  const metadata =
+    await sheets.spreadsheets.get({
+      spreadsheetId,
+      fields:
+        "sheets(properties(sheetId,title))"
+    });
+
+  const targetSheet =
+    metadata.data.sheets?.find(
+      (entry) =>
+        String(
+          entry.properties?.title || ""
+        ).trim() ===
+        String(sheetName || "").trim()
+    );
+
+  if (!targetSheet) {
+    throw new Error(
+      `Could not find sheet "${sheetName}" while updating the timezone error note.`
+    );
+  }
+
+  const columnIndex =
+    columnLetterToNumber(
+      layout.errorColumn
+    ) - 1;
+
+  await sheets.spreadsheets.batchUpdate({
+    spreadsheetId,
+    requestBody: {
+      requests: [
+        {
+          updateCells: {
+            range: {
+              sheetId:
+                targetSheet.properties.sheetId,
+              startRowIndex:
+                row - 1,
+              endRowIndex:
+                row,
+              startColumnIndex:
+                columnIndex,
+              endColumnIndex:
+                columnIndex + 1
+            },
+            rows: [
+              {
+                values: [
+                  {
+                    note:
+                      message
+                        ? String(message)
+                        : null
+                  }
+                ]
+              }
+            ],
+            fields: "note"
+          }
+        }
+      ]
+    }
+  });
+}
+
+
 async function processTimezoneWithAppsScript({
   spreadsheetId,
   sheetName,
@@ -4945,11 +5036,34 @@ async function processTimezoneWithAppsScript({
       );
     }
 
+    await setTimezoneErrorNote({
+      spreadsheetId,
+      sheetName,
+      row,
+      message: null
+    });
+
     return result;
   } catch (error) {
     if (error?.name === "AbortError") {
       throw new Error(
         "Apps Script did not respond within 15 seconds."
+      );
+    }
+
+    try {
+      await setTimezoneErrorNote({
+        spreadsheetId,
+        sheetName,
+        row,
+        message:
+          error?.message ||
+          "Timezone could not be recognized."
+      });
+    } catch (noteError) {
+      console.error(
+        "Could not write timezone error note:",
+        noteError
       );
     }
 
@@ -7032,6 +7146,9 @@ client.once(Events.ClientReady, readyClient => {
   }
 
   console.log("Prussian ORBAT bot is online.");
+  console.log(
+    "[TIMEZONE COLUMN RULE] Normal sheets: G/H; Krümper/Garnison: F/G; errors follow timezone column."
+  );
 });
 
 /*
