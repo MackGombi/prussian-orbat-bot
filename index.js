@@ -4241,7 +4241,7 @@ async function getMemberRecord({
     response.data.valueRanges?.[1]?.values?.[0]?.[0] || "";
 
   const timezoneStorageValue =
-    response.data.valueRanges?.[3]?.values?.[0]?.[0] || "";
+    response.data.valueRanges?.[2]?.values?.[0]?.[0] || "";
 
   const discordId =
     String(identity[1] || "").trim();
@@ -4256,7 +4256,7 @@ async function getMemberRecord({
           MAX_STRIKES,
           Number.parseInt(
             String(
-              response.data.valueRanges?.[2]?.values?.[0]?.[0] ||
+              response.data.valueRanges?.[3]?.values?.[0]?.[0] ||
               "0"
             ),
             10
